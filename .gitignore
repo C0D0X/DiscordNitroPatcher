@@ -1,0 +1,32 @@
+# Build artifacts
+build/
+out/
+*.obj
+*.exe
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.res
+*.tlog
+*.log
+
+# IDE
+.vs/
+.vscode/
+*.user
+*.suo
+CMakeCache.txt
+CMakeFiles/
+cmake-build-*/
+
+# OS
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# Local
+*.local
+local/
+cluade.bat
+claude.bat
