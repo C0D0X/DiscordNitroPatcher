@@ -11,7 +11,6 @@
 // dnp.exe instances and then acquire the mutex. Daemon/launch modes silently exit if the
 // mutex is held (another dnp.exe is already running).
 #include "config.h"
-#include "daemon.h"
 #include "installer.h"
 #include "patcher.h"
 #include "updater.h"
@@ -26,7 +25,7 @@ namespace dnp {
 
 namespace {
 
-enum class Mode { Auto, Launch, Install, Uninstall, Daemon, Version };
+enum class Mode { Auto, Launch, Install, Uninstall, Version };
 
 constexpr const wchar_t* SINGLE_INSTANCE_MUTEX = L"Local\\dnp_single_instance";
 
@@ -35,7 +34,6 @@ Mode parse_mode(int argc, wchar_t** argv) {
         std::wstring a = argv[i];
         if (a == L"--install")   return Mode::Install;
         if (a == L"--uninstall") return Mode::Uninstall;
-        if (a == L"--daemon")    return Mode::Daemon;
         if (a == L"--launch")    return Mode::Launch;
         if (a == L"--version" || a == L"-v") return Mode::Version;
     }
@@ -166,10 +164,6 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
             break;
         case Mode::Uninstall:
             rc = dnp::do_uninstall();
-            break;
-        case Mode::Daemon:
-            dnp::check_for_update_and_maybe_restart();
-            rc = dnp::run_daemon();
             break;
         case Mode::Launch:
             dnp::check_for_update_and_maybe_restart();

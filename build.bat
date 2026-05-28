@@ -37,7 +37,7 @@ cl /nologo /std:c++17 /O2 /MT /GS- /GL /EHsc /GR- /W3 ^
    /D _CRT_SECURE_NO_WARNINGS ^
    /I src ^
    src\main.cpp src\util.cpp src\json_lite.cpp src\asar.cpp src\patcher.cpp ^
-   src\daemon.cpp src\updater.cpp src\installer.cpp ^
+   src\shortcuts.cpp src\updater.cpp src\installer.cpp ^
    build\dnp.res ^
    /Fe:build\dnp.exe /Fo:build\ ^
    /link /SUBSYSTEM:WINDOWS /LTCG /OPT:REF,ICF ^

@@ -1,7 +1,14 @@
 // installer.cpp — first-run install + clean uninstall.
+//
+// Architecture: NO background process. Discord launcher entry points (Desktop / Start Menu /
+// Startup .lnk files + HKCU\Run\Discord registry value) are rewritten to invoke dnp.exe --launch
+// instead of Update.exe. Every Discord launch flows through dnp.exe which patches asar on demand
+// (post-Discord-auto-update) and then spawns Update.exe normally. dnp.exe exits as soon as Update.exe
+// is spawned — no persistent process for anti-cheat scanners to flag.
 #include "installer.h"
 #include "config.h"
 #include "patcher.h"
+#include "shortcuts.h"
 #include "util.h"
 
 #include <string>
@@ -34,38 +41,21 @@ bool copy_self_to_install_dir(std::wstring& out_installed_path) {
     return true;
 }
 
-bool register_scheduled_task(const std::wstring& exe_path) {
-    // /sc onlogon — runs at user logon. /rl limited — current user privileges, no elevation prompt.
-    // /it — interactive (allows showing UI in user session). /f — force overwrite if existing.
-    std::wstring cmd = L"schtasks.exe /create /f /tn ";
-    cmd += TASK_NAME;
-    cmd += L" /sc onlogon /rl limited /it /tr \"\\\"";
-    cmd += exe_path;
-    cmd += L"\\\" --daemon\"";
-
-    int code = run_command(cmd, true, false);
-    if (code != 0) {
-        LOG_WARN("schtasks create returned %d", code);
-        return false;
-    }
-    return true;
-}
-
-bool unregister_scheduled_task() {
+// Legacy cleanup: prior versions registered a scheduled task. Best-effort delete during
+// install/uninstall so upgraded users don't leave a stale task behind.
+void unregister_legacy_scheduled_task() {
     std::wstring cmd = L"schtasks.exe /delete /f /tn ";
     cmd += TASK_NAME;
-    int code = run_command(cmd, true, false);
-    if (code != 0) {
-        LOG_WARN("schtasks delete returned %d", code);
-        return false;
-    }
-    return true;
+    run_command(cmd, true, false);
 }
 
 } // namespace
 
 int do_install() {
     LOG_INFO("Install starting.");
+
+    // Wipe any task from prior daemon-era installs.
+    unregister_legacy_scheduled_task();
 
     std::wstring installed_path;
     if (!copy_self_to_install_dir(installed_path)) {
@@ -76,13 +66,14 @@ int do_install() {
         LOG_ERR("Payload extraction failed.");
         return 2;
     }
-    if (!register_scheduled_task(installed_path)) {
-        LOG_WARN("Scheduled task registration failed; continuing without daemon autorun.");
-    }
+
+    // Rewrite Discord launcher entry points to flow through dnp.exe --launch.
+    int wrapped = wrap_all_discord_launchers(installed_path);
+    LOG_INFO("Wrapped %d Discord launcher entr%s.", wrapped, wrapped == 1 ? "y" : "ies");
 
     auto app_dir = find_latest_discord_app_dir();
     if (!app_dir) {
-        LOG_WARN("Discord install not located. Patch deferred until Discord is installed.");
+        LOG_WARN("Discord install not located. Patch deferred until first Discord launch.");
         return 0;
     }
 
@@ -96,26 +87,23 @@ int do_install() {
     Sleep(200);
     launch_discord();
 
-    // Kick off daemon for immediate coverage. Use a delayed spawn so our single-instance mutex
-    // (held by this installer process) has time to release before the daemon tries to acquire it.
-    {
-        std::wstring cmd = L"cmd.exe /c timeout /t 2 /nobreak >nul & start \"\" \"" +
-                           installed_path + L"\" --daemon";
-        run_command(cmd, false, false);
-    }
-
     LOG_INFO("Install complete.");
     return 0;
 }
 
 int do_uninstall() {
     LOG_INFO("Uninstall starting.");
-    unregister_scheduled_task();
 
-    // Stop any other dnp.exe instances (daemon, prior installer) but not this process.
-    // Previous taskkill /im dnp.exe killed ourselves mid-uninstall — replaced with PID-filtered helper.
+    // Legacy task cleanup (no-op if none registered).
+    unregister_legacy_scheduled_task();
+
+    // Stop any other dnp.exe instances (concurrent launcher, prior installer) but not this process.
     int killed = kill_processes_by_name_except_self(L"dnp.exe");
     if (killed > 0) LOG_INFO("Terminated %d other dnp.exe instance(s).", killed);
+
+    // Restore Discord launcher entry points before touching app.asar.
+    int restored = unwrap_all_discord_launchers();
+    LOG_INFO("Restored %d Discord launcher entr%s.", restored, restored == 1 ? "y" : "ies");
 
     kill_discord_processes();
 
