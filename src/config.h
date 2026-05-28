@@ -10,9 +10,9 @@ namespace dnp {
 constexpr bool DEV_MODE = false;
 
 // === Versioning ===
-constexpr const wchar_t* VERSION = L"0.1.0";
+constexpr const wchar_t* VERSION = L"0.2.0";
 constexpr int VERSION_MAJOR = 0;
-constexpr int VERSION_MINOR = 1;
+constexpr int VERSION_MINOR = 2;
 constexpr int VERSION_PATCH = 0;
 
 // === GitHub auto-update ===

@@ -37,11 +37,11 @@ cl /nologo /std:c++17 /O2 /MT /GS- /GL /EHsc /GR- /W3 ^
    /D _CRT_SECURE_NO_WARNINGS ^
    /I src ^
    src\main.cpp src\util.cpp src\json_lite.cpp src\asar.cpp src\patcher.cpp ^
-   src\shortcuts.cpp src\updater.cpp src\installer.cpp ^
+   src\shortcuts.cpp src\updater.cpp src\installer.cpp src\ui.cpp ^
    build\dnp.res ^
    /Fe:build\dnp.exe /Fo:build\ ^
    /link /SUBSYSTEM:WINDOWS /LTCG /OPT:REF,ICF ^
-   kernel32.lib user32.lib shell32.lib advapi32.lib winhttp.lib bcrypt.lib shlwapi.lib psapi.lib ole32.lib
+   kernel32.lib user32.lib shell32.lib advapi32.lib winhttp.lib bcrypt.lib shlwapi.lib psapi.lib ole32.lib dwmapi.lib uxtheme.lib comctl32.lib gdi32.lib
 if errorlevel 1 (
     echo [build] cl.exe failed.
     exit /b 1

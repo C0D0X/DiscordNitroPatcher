@@ -13,6 +13,7 @@
 #include "config.h"
 #include "installer.h"
 #include "patcher.h"
+#include "ui.h"
 #include "updater.h"
 #include "util.h"
 
@@ -25,7 +26,7 @@ namespace dnp {
 
 namespace {
 
-enum class Mode { Auto, Launch, Install, Uninstall, Version };
+enum class Mode { Auto, Launch, Install, Uninstall, Version, UI };
 
 constexpr const wchar_t* SINGLE_INSTANCE_MUTEX = L"Local\\dnp_single_instance";
 
@@ -35,6 +36,7 @@ Mode parse_mode(int argc, wchar_t** argv) {
         if (a == L"--install")   return Mode::Install;
         if (a == L"--uninstall") return Mode::Uninstall;
         if (a == L"--launch")    return Mode::Launch;
+        if (a == L"--ui")        return Mode::UI;
         if (a == L"--version" || a == L"-v") return Mode::Version;
     }
     return Mode::Auto;
@@ -69,27 +71,9 @@ int do_launch() {
     return 0;
 }
 
-// First-run install: self-installs into %LOCALAPPDATA%\dnp\, registers task, patches Discord.
-// Reports outcome via MessageBox so a friend double-clicking the exe gets feedback.
-int auto_first_run_install() {
-    int rc = do_install();
-    if (DEV_MODE) return rc;  // dev console already shows logs
-    if (rc == 0) {
-        MessageBoxW(nullptr,
-            L"DiscordNitroPatcher installed.\n\n"
-            L"Discord has been patched and relaunched. The patch will be re-applied "
-            L"automatically after every Discord update.",
-            L"DiscordNitroPatcher",
-            MB_OK | MB_ICONINFORMATION);
-    } else {
-        wchar_t buf[256];
-        swprintf(buf, 256,
-            L"Install failed (code %d).\nSee %%LOCALAPPDATA%%\\dnp\\log.txt for details.",
-            rc);
-        MessageBoxW(nullptr, buf, L"DiscordNitroPatcher", MB_OK | MB_ICONERROR);
-    }
-    return rc;
-}
+// Privileged modes that can preempt other dnp.exe processes via the mutex acquire-or-kill path.
+// Mode::UI now plays this role for first-run double-click: it opens the control panel which the
+// user uses to drive install / uninstall manually.
 
 // Acquire the global single-instance mutex with a policy appropriate for the given mode.
 //   - Install/Uninstall/Auto: privileged — terminate any existing dnp.exe, then acquire.
@@ -102,7 +86,8 @@ HANDLE acquire_mutex_for_mode(Mode mode, bool& out_should_continue) {
     out_should_continue = true;
     if (mode == Mode::Version) return nullptr; // no gating
 
-    const bool privileged = (mode == Mode::Install || mode == Mode::Uninstall || mode == Mode::Auto);
+    const bool privileged = (mode == Mode::Install || mode == Mode::Uninstall ||
+                             mode == Mode::Auto    || mode == Mode::UI);
 
     HANDLE h = acquire_single_instance_mutex(SINGLE_INSTANCE_MUTEX);
     if (h) return h;
@@ -169,16 +154,17 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
             dnp::check_for_update_and_maybe_restart();
             rc = dnp::do_launch();
             break;
+        case Mode::UI:
+            dnp::check_for_update_and_maybe_restart();
+            rc = dnp::run_ui();
+            break;
         case Mode::Auto:
         default:
-            // No args: distinguish first-run (run from any path other than install dir)
-            // from subsequent runs (run from install dir — act as launcher).
-            if (dnp::running_from_install_dir()) {
-                dnp::check_for_update_and_maybe_restart();
-                rc = dnp::do_launch();
-            } else {
-                rc = dnp::auto_first_run_install();
-            }
+            // No args: always show the UI. Wrapped Discord shortcuts pass --launch explicitly,
+            // so they take the fast launcher path; bare double-clicks (Downloads folder, Start
+            // Menu entry created at install time, etc.) land in the control panel.
+            dnp::check_for_update_and_maybe_restart();
+            rc = dnp::run_ui();
             break;
     }
 

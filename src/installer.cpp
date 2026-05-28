@@ -11,7 +11,13 @@
 #include "shortcuts.h"
 #include "util.h"
 
+#include <shlobj.h>
+#include <shobjidl.h>
+#include <objbase.h>
 #include <string>
+
+#pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "uuid.lib")
 
 namespace dnp {
 
@@ -49,6 +55,47 @@ void unregister_legacy_scheduled_task() {
     run_command(cmd, true, false);
 }
 
+// Create / remove a Start Menu shortcut "DiscordNitroPatcher.lnk" that opens the control UI.
+std::wstring start_menu_shortcut_path() {
+    PWSTR p = nullptr;
+    if (SHGetKnownFolderPath(FOLDERID_Programs, 0, nullptr, &p) != S_OK || !p) return L"";
+    std::wstring out(p);
+    CoTaskMemFree(p);
+    return path_join(out, L"DiscordNitroPatcher.lnk");
+}
+
+bool create_start_menu_shortcut(const std::wstring& dnp_exe) {
+    if (CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED) != S_OK &&
+        CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED) != S_FALSE) {
+        // Tolerate already-initialized.
+    }
+    bool ok = false;
+    IShellLinkW* psl = nullptr;
+    if (CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER,
+                         IID_IShellLinkW, (void**)&psl) == S_OK && psl) {
+        psl->SetPath(dnp_exe.c_str());
+        psl->SetArguments(L"--ui");
+        psl->SetDescription(L"DiscordNitroPatcher control panel");
+        psl->SetWorkingDirectory(install_dir().c_str());
+
+        IPersistFile* ppf = nullptr;
+        if (psl->QueryInterface(IID_IPersistFile, (void**)&ppf) == S_OK && ppf) {
+            std::wstring p = start_menu_shortcut_path();
+            if (!p.empty() && ppf->Save(p.c_str(), TRUE) == S_OK) ok = true;
+            ppf->Release();
+        }
+        psl->Release();
+    }
+    CoUninitialize();
+    return ok;
+}
+
+bool remove_start_menu_shortcut() {
+    std::wstring p = start_menu_shortcut_path();
+    if (p.empty()) return false;
+    return remove_file(p);
+}
+
 } // namespace
 
 int do_install() {
@@ -70,6 +117,13 @@ int do_install() {
     // Rewrite Discord launcher entry points to flow through dnp.exe --launch.
     int wrapped = wrap_all_discord_launchers(installed_path);
     LOG_INFO("Wrapped %d Discord launcher entr%s.", wrapped, wrapped == 1 ? "y" : "ies");
+
+    // Create a Start Menu entry so the user can reopen the control panel later.
+    if (create_start_menu_shortcut(installed_path)) {
+        LOG_INFO("Start Menu shortcut created.");
+    } else {
+        LOG_WARN("Failed to create Start Menu shortcut.");
+    }
 
     auto app_dir = find_latest_discord_app_dir();
     if (!app_dir) {
@@ -104,6 +158,9 @@ int do_uninstall() {
     // Restore Discord launcher entry points before touching app.asar.
     int restored = unwrap_all_discord_launchers();
     LOG_INFO("Restored %d Discord launcher entr%s.", restored, restored == 1 ? "y" : "ies");
+
+    // Remove our Start Menu entry.
+    remove_start_menu_shortcut();
 
     kill_discord_processes();
 
