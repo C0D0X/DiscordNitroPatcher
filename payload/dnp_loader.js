@@ -348,41 +348,102 @@
         const electron = require('electron');
         diag('loader', 'electron require ok, BrowserWindow type=' + typeof electron.BrowserWindow);
 
-        const Orig = electron.BrowserWindow;
+        const OrigBrowserWindow = electron.BrowserWindow;
 
-        class PatchedBrowserWindow extends Orig {
-            constructor(opts) {
-                opts = opts || {};
-                opts.webPreferences = opts.webPreferences || {};
-                const userPreload = opts.webPreferences.preload;
-                opts.webPreferences.preload          = RENDERER_PATH;
-                opts.webPreferences.sandbox          = false;
-                opts.webPreferences.contextIsolation = false;
-                opts.webPreferences.nodeIntegration  = true;
-                if (userPreload && userPreload !== RENDERER_PATH) {
-                    // Chain Discord's existing preload by writing a tiny shim that requires both.
-                    try {
-                        const chain = path.join(DNP_DIR, `chain_${process.pid}.js`);
-                        fs.writeFileSync(chain,
-                            `try { require(${JSON.stringify(userPreload)}); } catch (e) {}\n` +
-                            `try { require(${JSON.stringify(RENDERER_PATH)}); } catch (e) {}\n`);
-                        opts.webPreferences.preload = chain;
-                    } catch (_) {}
+        // Wrap webPreferences to inject our preload + relax isolation enough for the renderer
+        // to access window.webpackChunkdiscord_app and use node fs for diagnostics.
+        function patchOpts(opts) {
+            opts = opts || {};
+            opts.webPreferences = opts.webPreferences || {};
+            const userPreload = opts.webPreferences.preload;
+            if (userPreload && userPreload !== RENDERER_PATH) {
+                try {
+                    const chain = path.join(DNP_DIR, `chain_${process.pid}.js`);
+                    fs.writeFileSync(chain,
+                        `try { require(${JSON.stringify(userPreload)}); } catch (e) {}\n` +
+                        `try { require(${JSON.stringify(RENDERER_PATH)}); } catch (e) {}\n`);
+                    opts.webPreferences.preload = chain;
+                } catch (_) {
+                    opts.webPreferences.preload = RENDERER_PATH;
                 }
-                diag('loader', 'BrowserWindow constructed with our preload');
-                super(opts);
+            } else {
+                opts.webPreferences.preload = RENDERER_PATH;
             }
+            opts.webPreferences.sandbox          = false;
+            opts.webPreferences.contextIsolation = false;
+            opts.webPreferences.nodeIntegration  = true;
+            return opts;
         }
 
+        // PatchedBrowserWindow is a constructor wrapper that mutates webPreferences before super().
+        // Using `extends` keeps prototype chain identity intact so Discord's instanceof checks pass.
+        class PatchedBrowserWindow extends OrigBrowserWindow {
+            constructor(opts) {
+                diag('loader', 'PatchedBrowserWindow instantiated');
+                super(patchOpts(opts));
+            }
+        }
+        // Preserve static members (BrowserWindow.fromWebContents, BrowserWindow.getAllWindows, ...).
+        for (const k of Object.getOwnPropertyNames(OrigBrowserWindow)) {
+            if (k === 'length' || k === 'name' || k === 'prototype') continue;
+            try {
+                Object.defineProperty(PatchedBrowserWindow, k,
+                    Object.getOwnPropertyDescriptor(OrigBrowserWindow, k));
+            } catch (_) {}
+        }
+
+        // Electron 37 marks electron.BrowserWindow non-configurable, so Object.defineProperty
+        // on the exports object fails. Instead intercept Module._load: when downstream code
+        // requires 'electron', return a Proxy that yields PatchedBrowserWindow for the
+        // BrowserWindow property and forwards everything else to the real module.
         try {
-            Object.defineProperty(electron, 'BrowserWindow', {
-                configurable: true,
-                get() { return PatchedBrowserWindow; },
-                set() { /* lock-in */ }
+            const Module = require('module');
+            const electronProxy = new Proxy(electron, {
+                get(target, prop, receiver) {
+                    if (prop === 'BrowserWindow') return PatchedBrowserWindow;
+                    return Reflect.get(target, prop, receiver);
+                }
             });
-            diag('loader', 'BrowserWindow override installed');
+            const origLoad = Module._load;
+            let inHook = false;
+            Module._load = function (request, parent, isMain) {
+                const result = origLoad.apply(this, arguments);
+                if (inHook) return result;
+                if (request === 'electron' && result && result.BrowserWindow === OrigBrowserWindow) {
+                    inHook = true;
+                    try {
+                        return electronProxy;
+                    } finally {
+                        inHook = false;
+                    }
+                }
+                return result;
+            };
+            diag('loader', 'Module._load proxy hook installed for electron');
         } catch (e) {
-            diag('loader', 'failed defineProperty on electron.BrowserWindow: ' + (e && e.message));
+            diag('loader', 'Module._load hook err: ' + (e && e.message));
+        }
+
+        // Defense in depth: catch any window that slips past the proxy (e.g. created via direct
+        // reference Discord already destructured before our hook ran).
+        try {
+            electron.app.on('browser-window-created', (_event, win) => {
+                diag('loader', 'browser-window-created event fired');
+                try {
+                    const wc = win.webContents;
+                    if (!wc) return;
+                    // Best-effort: inject the renderer source via executeJavaScript at the
+                    // earliest possible renderer event. The preload path above is the
+                    // primary mechanism; this is a fallback for unhooked windows.
+                    wc.on('dom-ready', () => {
+                        wc.executeJavaScript(RENDERER_SOURCE).catch(err => {
+                            diag('loader', 'executeJavaScript fallback err: ' + (err && err.message));
+                        });
+                    });
+                } catch (e) { diag('loader', 'window event setup err: ' + (e && e.message)); }
+            });
+        } catch (e) {
+            diag('loader', 'app event subscribe err: ' + (e && e.message));
         }
     } catch (e) {
         diag('loader', 'electron setup outer err: ' + (e && e.stack || e));
