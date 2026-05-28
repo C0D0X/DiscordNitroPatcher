@@ -100,7 +100,8 @@ Json* Asar::ensure_parent_files(const std::string& rel_path, std::string& out_le
 // ============================================================================
 
 bool Asar::load(const std::wstring& path) {
-    auto buf_opt = read_file(path);
+    // Qualify to the free function in dnp:: — unqualified name resolves to Asar::read_file(string).
+    auto buf_opt = ::dnp::read_file(path);
     if (!buf_opt) return false;
     const auto& buf = *buf_opt;
     if (buf.size() < 16) return false;
@@ -269,7 +270,8 @@ bool Asar::save(const std::wstring& path) const {
         memcpy(&out_buf[16 + json_padded], new_blob.data(), new_blob.size());
     }
 
-    return write_file(path, out_buf);
+    // Qualify to the free function — Asar::write_file is the non-const member.
+    return ::dnp::write_file(path, out_buf);
 }
 
 // ============================================================================

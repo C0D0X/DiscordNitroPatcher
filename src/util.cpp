@@ -4,6 +4,7 @@
 
 #include <shlobj.h>
 #include <shlwapi.h>
+#include <shellapi.h>
 #include <bcrypt.h>
 
 #include <cstdarg>
@@ -222,7 +223,9 @@ std::string sha256_hex(const std::vector<uint8_t>& data) {
 
 std::optional<std::vector<uint8_t>> load_resource(int resource_id) {
     HMODULE mod = GetModuleHandleW(nullptr);
-    HRSRC res = FindResourceW(mod, MAKEINTRESOURCEW(resource_id), RT_RCDATA);
+    // RT_RCDATA expands to MAKEINTRESOURCE(10) which is ANSI when UNICODE isn't defined.
+    // FindResourceW requires LPCWSTR for the type parameter, so spell out MAKEINTRESOURCEW(10).
+    HRSRC res = FindResourceW(mod, MAKEINTRESOURCEW(resource_id), MAKEINTRESOURCEW(10));
     if (!res) return std::nullopt;
     DWORD size = SizeofResource(mod, res);
     HGLOBAL hg = LoadResource(mod, res);

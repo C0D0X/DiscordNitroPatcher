@@ -7,6 +7,7 @@
 
 #include <tlhelp32.h>
 #include <psapi.h>
+#include <shellapi.h>
 
 #include <algorithm>
 #include <cstring>

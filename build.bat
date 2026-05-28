@@ -34,7 +34,7 @@ if errorlevel 1 (
 
 rem Compile and link.
 cl /nologo /std:c++17 /O2 /MT /GS- /GL /EHsc /GR- /W3 ^
-   /D WIN32_LEAN_AND_MEAN /D NOMINMAX /D _CRT_SECURE_NO_WARNINGS ^
+   /D _CRT_SECURE_NO_WARNINGS ^
    /I src ^
    src\main.cpp src\util.cpp src\json_lite.cpp src\asar.cpp src\patcher.cpp ^
    src\daemon.cpp src\updater.cpp src\installer.cpp ^
