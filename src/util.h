@@ -47,6 +47,16 @@ std::optional<std::vector<uint8_t>> load_resource(int resource_id);
 int run_command(const std::wstring& cmdline, bool wait, bool show_window);
 std::wstring self_exe_path();
 
+// Terminate every process with the given image name (case-insensitive) except the current
+// process. Returns number of processes terminated.
+int kill_processes_by_name_except_self(const std::wstring& exe_name);
+
+// Acquire a per-user named single-instance mutex. Returns:
+//   - non-null handle if we are the first/only instance (caller must keep handle alive)
+//   - nullptr if another instance already holds it
+// Caller is responsible for CloseHandle on the returned handle at shutdown.
+HANDLE acquire_single_instance_mutex(const wchar_t* name);
+
 // ---- Logging ---------------------------------------------------------------
 // Levels: 0=error, 1=warn, 2=info, 3=debug.
 // In DEV_MODE: stdout + file. Otherwise: file only and only level <= 1.

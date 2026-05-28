@@ -96,9 +96,11 @@ int do_install() {
     Sleep(200);
     launch_discord();
 
-    // Also kick off daemon now so user gets coverage immediately without waiting for next logon.
+    // Kick off daemon for immediate coverage. Use a delayed spawn so our single-instance mutex
+    // (held by this installer process) has time to release before the daemon tries to acquire it.
     {
-        std::wstring cmd = L"\"" + installed_path + L"\" --daemon";
+        std::wstring cmd = L"cmd.exe /c timeout /t 2 /nobreak >nul & start \"\" \"" +
+                           installed_path + L"\" --daemon";
         run_command(cmd, false, false);
     }
 
@@ -110,11 +112,10 @@ int do_uninstall() {
     LOG_INFO("Uninstall starting.");
     unregister_scheduled_task();
 
-    // Stop running daemon: best-effort by name.
-    {
-        std::wstring cmd = L"taskkill.exe /f /im dnp.exe";
-        run_command(cmd, true, false);
-    }
+    // Stop any other dnp.exe instances (daemon, prior installer) but not this process.
+    // Previous taskkill /im dnp.exe killed ourselves mid-uninstall — replaced with PID-filtered helper.
+    int killed = kill_processes_by_name_except_self(L"dnp.exe");
+    if (killed > 0) LOG_INFO("Terminated %d other dnp.exe instance(s).", killed);
 
     kill_discord_processes();
 

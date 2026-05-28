@@ -5,6 +5,11 @@
 // extracts payload, registers the logon scheduled task, patches Discord, and relaunches it.
 // Subsequent runs (from the install dir, or via the scheduled task) skip install and act as
 // daemon / launcher.
+//
+// Single-instance policy: a per-user named mutex Local\dnp_single_instance gates all modes
+// except --version. Install/uninstall/auto modes take priority — they terminate any other
+// dnp.exe instances and then acquire the mutex. Daemon/launch modes silently exit if the
+// mutex is held (another dnp.exe is already running).
 #include "config.h"
 #include "daemon.h"
 #include "installer.h"
@@ -22,6 +27,8 @@ namespace dnp {
 namespace {
 
 enum class Mode { Auto, Launch, Install, Uninstall, Daemon, Version };
+
+constexpr const wchar_t* SINGLE_INSTANCE_MUTEX = L"Local\\dnp_single_instance";
 
 Mode parse_mode(int argc, wchar_t** argv) {
     for (int i = 1; i < argc; ++i) {
@@ -86,6 +93,40 @@ int auto_first_run_install() {
     return rc;
 }
 
+// Acquire the global single-instance mutex with a policy appropriate for the given mode.
+//   - Install/Uninstall/Auto: privileged — terminate any existing dnp.exe, then acquire.
+//   - Daemon/Launch: silent exit if another instance holds the mutex.
+//   - Version: no mutex.
+// Returns mutex handle to keep alive, or nullptr to indicate the caller should exit (rc=0).
+//
+// out_should_continue is set to true if execution should proceed, false to exit silently.
+HANDLE acquire_mutex_for_mode(Mode mode, bool& out_should_continue) {
+    out_should_continue = true;
+    if (mode == Mode::Version) return nullptr; // no gating
+
+    const bool privileged = (mode == Mode::Install || mode == Mode::Uninstall || mode == Mode::Auto);
+
+    HANDLE h = acquire_single_instance_mutex(SINGLE_INSTANCE_MUTEX);
+    if (h) return h;
+
+    if (!privileged) {
+        // Another instance is running and we yield silently.
+        out_should_continue = false;
+        return nullptr;
+    }
+
+    // Privileged path: terminate other instances, then retry mutex acquire (with a short retry loop
+    // because the OS releases the mutex asynchronously after the holder process is terminated).
+    kill_processes_by_name_except_self(L"dnp.exe");
+    for (int i = 0; i < 50; ++i) {
+        h = acquire_single_instance_mutex(SINGLE_INSTANCE_MUTEX);
+        if (h) return h;
+        Sleep(100);
+    }
+    // Couldn't acquire even after kill — proceed anyway without mutex (best-effort).
+    return nullptr;
+}
+
 } // namespace
 
 } // namespace dnp
@@ -99,6 +140,14 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
 
     using dnp::Mode;
     Mode m = dnp::parse_mode(argc, argv);
+
+    // Single-instance gate — must happen before any side-effecting work.
+    bool should_continue = true;
+    HANDLE single_instance = dnp::acquire_mutex_for_mode(m, should_continue);
+    if (!should_continue) {
+        if (argv) LocalFree(argv);
+        return 0;
+    }
 
     dnp::log_init();
     LOG_INFO("dnp %ls mode=%d", dnp::VERSION, (int)m);
@@ -140,6 +189,7 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
     }
 
     if (argv) LocalFree(argv);
+    if (single_instance) CloseHandle(single_instance);
     dnp::log_shutdown();
     return rc;
 }

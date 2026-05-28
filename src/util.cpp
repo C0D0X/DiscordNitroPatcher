@@ -6,6 +6,7 @@
 #include <shlwapi.h>
 #include <shellapi.h>
 #include <bcrypt.h>
+#include <tlhelp32.h>
 
 #include <cstdarg>
 #include <cstdio>
@@ -271,6 +272,45 @@ std::wstring self_exe_path() {
     DWORD n = GetModuleFileNameW(nullptr, buf, (DWORD)(sizeof(buf) / sizeof(buf[0])));
     if (n == 0 || n >= sizeof(buf) / sizeof(buf[0])) return L"";
     return std::wstring(buf, n);
+}
+
+int kill_processes_by_name_except_self(const std::wstring& exe_name) {
+    const DWORD self_pid = GetCurrentProcessId();
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return 0;
+
+    int killed = 0;
+    PROCESSENTRY32W pe{};
+    pe.dwSize = sizeof(pe);
+    if (Process32FirstW(snap, &pe)) {
+        do {
+            if (pe.th32ProcessID == self_pid) continue;
+            if (_wcsicmp(pe.szExeFile, exe_name.c_str()) != 0) continue;
+            HANDLE h = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, pe.th32ProcessID);
+            if (!h) continue;
+            if (TerminateProcess(h, 0)) {
+                WaitForSingleObject(h, 2000);
+                ++killed;
+            }
+            CloseHandle(h);
+        } while (Process32NextW(snap, &pe));
+    }
+    CloseHandle(snap);
+    return killed;
+}
+
+HANDLE acquire_single_instance_mutex(const wchar_t* name) {
+    // Local\ namespace = per-session, per-user — sufficient for friends-tier use.
+    SetLastError(ERROR_SUCCESS);
+    HANDLE h = CreateMutexW(nullptr, TRUE, name);
+    DWORD e = GetLastError();
+    if (!h) return nullptr;
+    if (e == ERROR_ALREADY_EXISTS) {
+        // Another instance owns it. Release our handle and report busy.
+        CloseHandle(h);
+        return nullptr;
+    }
+    return h;
 }
 
 // ============================================================================
