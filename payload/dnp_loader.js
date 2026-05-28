@@ -78,6 +78,41 @@
         patchedMaxFileSize: false,
     };
 
+    // Public diagnostic — readable via DevTools console as window.__dnp_status to confirm
+    // patch outcome on each Discord build without needing log file access.
+    try {
+        if (!window.__dnp_status) {
+            window.__dnp_status = {
+                version: 'dnp',
+                loaded: true,
+                chunkArrayName: null,
+                wpRequireCaptured: false,
+                factoryCount: 0,
+                patches: {
+                    userStore: false,
+                    userProfileStore: false,
+                    videoQuality: false,
+                    streamSettings: false,
+                    maxFileSize: false,
+                },
+                lastError: null,
+                ticks: 0,
+            };
+        }
+    } catch (_) {}
+    function setStatus(field, val) {
+        try { if (window.__dnp_status) window.__dnp_status[field] = val; } catch (_) {}
+    }
+    function setPatch(name, val) {
+        try { if (window.__dnp_status && window.__dnp_status.patches) window.__dnp_status.patches[name] = val; } catch (_) {}
+    }
+    function pushErr(e) {
+        try {
+            if (!window.__dnp_status) return;
+            window.__dnp_status.lastError = String(e && e.message || e);
+        } catch (_) {}
+    }
+
     // Generic Webpack module finder.
     // Walks the factory map (wpRequire.m), filters by source-code substrings, then instantiates
     // the matching factory and probes each common export shape for the required own/prototype keys.
@@ -133,6 +168,7 @@
             if (cur) { state.currentUserId = cur.id; cur.premiumType = PREMIUM_TIER_NITRO; }
         } catch (_) {}
         state.userStore = store;
+        setPatch('userStore', true);
         log('UserStore patched');
     }
 
@@ -152,6 +188,7 @@
             return p;
         };
         state.userProfileStore = store;
+        setPatch('userProfileStore', true);
         log('UserProfileStore patched');
     }
 
@@ -215,6 +252,7 @@
             return orig.apply(this, arguments);
         };
         state.patchedVideoQuality = true;
+        setPatch('videoQuality', true);
         log('updateVideoQuality wrapped');
     }
 
@@ -235,6 +273,7 @@
                 if (/resolution\s*&&|fps\s*&&|preset\s*&&/.test(src)) {
                     mod[key] = function () { return true; };
                     state.patchedStreamSettings = true;
+                    setPatch('streamSettings', true);
                     log('areStreamSettingsAllowed bypassed (' + key + ')');
                     break;
                 }
@@ -256,6 +295,7 @@
                 if (src.includes('getUserMaxFileSize')) {
                     mod[key] = function () { return 500 * 1024 * 1024; };
                     state.patchedMaxFileSize = true;
+                    setPatch('maxFileSize', true);
                     log('getMaxFileSize bumped to 500MB');
                     break;
                 }
@@ -272,8 +312,12 @@
     }
 
     // -------- Webpack hook --------
-    function attach(arr) {
+    function attach(arr, name) {
         if (!arr || typeof arr.push !== 'function') return;
+        if (arr.__dnp_attached) return;
+        arr.__dnp_attached = true;
+        setStatus('chunkArrayName', name || 'unknown');
+
         // Inject a synthetic chunk so we capture a reference to Discord's __webpack_require__.
         try {
             const tag = 'dnp_capture_' + Math.random().toString(36).slice(2);
@@ -282,11 +326,13 @@
                 {},
                 function (req) {
                     wpRequire = req;
-                    log('captured wpRequire, factories=' + (req && req.m ? Object.keys(req.m).length : 0));
+                    setStatus('wpRequireCaptured', true);
+                    setStatus('factoryCount', req && req.m ? Object.keys(req.m).length : 0);
+                    log('captured wpRequire via ' + name + ', factories=' + (req && req.m ? Object.keys(req.m).length : 0));
                     sweep();
                 }
             ]);
-        } catch (e) { log('synthetic push err: ' + e.message); }
+        } catch (e) { pushErr(e); log('synthetic push err: ' + e.message); }
 
         const realPush = arr.push.bind(arr);
         arr.push = function (chunk) {
@@ -294,39 +340,63 @@
             try { sweep(); } catch (_) {}
             return r;
         };
-        log('chunk array hook attached');
+        log('chunk array hook attached (' + name + ')');
+    }
+
+    // Auto-detect: scan window for any existing webpackChunk* property holding an Array.
+    // Future-proof against Discord renaming 'webpackChunkdiscord_app' to anything else.
+    function findExistingChunkArray() {
+        try {
+            for (const k of Object.keys(window)) {
+                if (typeof k !== 'string') continue;
+                if (!k.startsWith('webpackChunk')) continue;
+                const v = window[k];
+                if (Array.isArray(v) && !v.__dnp_attached) {
+                    return { name: k, arr: v };
+                }
+            }
+        } catch (_) {}
+        return null;
     }
 
     function install() {
-        try {
-            const existing = window.webpackChunkdiscord_app;
-            if (Array.isArray(existing)) {
-                attach(existing);
-                return;
-            }
-        } catch (_) {}
+        // Path 1: if a chunk array already exists, attach immediately.
+        const found = findExistingChunkArray();
+        if (found) { attach(found.arr, found.name); return; }
 
-        Object.defineProperty(window, 'webpackChunkdiscord_app', {
-            configurable: true,
-            set(v) {
-                try {
-                    Object.defineProperty(window, 'webpackChunkdiscord_app', {
-                        configurable: true, writable: true, value: v
-                    });
-                } catch (_) {}
-                attach(v);
-            }
-        });
-        log('webpackChunkdiscord_app setter installed');
+        // Path 2: install setter for the historically-stable name. Fires synchronously when
+        // Discord's runtime initializes its chunk array.
+        try {
+            Object.defineProperty(window, 'webpackChunkdiscord_app', {
+                configurable: true,
+                set(v) {
+                    try {
+                        Object.defineProperty(window, 'webpackChunkdiscord_app', {
+                            configurable: true, writable: true, value: v
+                        });
+                    } catch (_) {}
+                    attach(v, 'webpackChunkdiscord_app');
+                }
+            });
+            log('webpackChunkdiscord_app setter installed');
+        } catch (e) { pushErr(e); log('setter install err: ' + (e && e.message)); }
     }
 
-    try { install(); } catch (e) { log('install err: ' + (e && e.message)); }
+    try { install(); } catch (e) { pushErr(e); log('install err: ' + (e && e.message)); }
 
-    // Periodic re-sweep — catches modules that load after initial chunk burst.
+    // Periodic re-scan + sweep. Two responsibilities:
+    //   1. Catch chunk arrays created under a name we didn't anticipate (Discord rename).
+    //   2. Re-sweep so modules loaded after the initial chunk burst get patched.
     let ticks = 0;
     const iv = setInterval(function () {
         ticks++;
-        try { sweep(); } catch (_) {}
+        setStatus('ticks', ticks);
+        // Detect late-arriving chunk arrays under any name.
+        if (!wpRequire) {
+            const f = findExistingChunkArray();
+            if (f) attach(f.arr, f.name);
+        }
+        try { sweep(); } catch (e) { pushErr(e); }
         if (ticks > 60 || (state.userStore && state.patchedVideoQuality && state.patchedStreamSettings)) {
             clearInterval(iv);
             log('sweep loop done, ticks=' + ticks);

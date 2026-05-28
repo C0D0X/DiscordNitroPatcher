@@ -7,7 +7,7 @@ namespace dnp {
 // === Build-time toggles ===
 // DEV_MODE: console window, verbose logging, skips self-update.
 // Flip to false for friend distribution builds.
-constexpr bool DEV_MODE = true;
+constexpr bool DEV_MODE = false;
 
 // === Versioning ===
 constexpr const wchar_t* VERSION = L"0.1.0";
