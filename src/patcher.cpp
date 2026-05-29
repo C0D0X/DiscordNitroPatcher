@@ -1,4 +1,4 @@
-// patcher.cpp — Discord install location, kill/launch, asar patch apply/restore.
+// Discord patch - install, kill, launch, patch/restore
 #include "patcher.h"
 #include "asar.h"
 #include "config.h"
@@ -18,10 +18,6 @@
 #pragma comment(lib, "psapi.lib")
 
 namespace dnp {
-
-// ============================================================================
-// find_latest_discord_app_dir
-// ============================================================================
 
 namespace {
 
@@ -92,19 +88,11 @@ std::wstring asar_path_in_app_dir(const std::wstring& app_dir) {
     return path_join(app_dir, ASAR_RELPATH);
 }
 
-// ============================================================================
-// is_patched
-// ============================================================================
-
 bool is_patched(const std::wstring& asar_path) {
     Asar a;
     if (!a.load(asar_path)) return false;
     return a.has_sentinel(SENTINEL_VERSION);
 }
-
-// ============================================================================
-// Process control
-// ============================================================================
 
 namespace {
 
@@ -165,7 +153,6 @@ void force_kill(DWORD pid) {
     CloseHandle(h);
 }
 
-// Collects the closure of descendants for a given root PID.
 void collect_descendants(const std::vector<ProcInfo>& procs, DWORD root, std::unordered_set<DWORD>& out) {
     bool changed = true;
     out.insert(root);
@@ -188,17 +175,13 @@ bool kill_discord_processes() {
     }
     if (roots.empty()) return true;
 
-    // Step 1: graceful close on each root.
     for (DWORD pid : roots) post_close_to_pid(pid);
     Sleep(KILL_GRACEFUL_WAIT_MS);
 
-    // Re-snapshot — children may have changed.
     procs = snapshot_processes();
 
-    // Step 2: identify all PIDs in the Discord process tree (alive ones).
     std::unordered_set<DWORD> tree;
     for (DWORD r : roots) {
-        // Verify root still in current snapshot — if it has same name, include.
         for (const auto& p : procs) {
             if (p.pid == r && iequals(p.exe_name, DISCORD_PROC_NAME)) {
                 collect_descendants(procs, r, tree);
@@ -206,22 +189,15 @@ bool kill_discord_processes() {
             }
         }
     }
-    // Also pick up any straggling Discord.exe processes (renderer/helper labelled differently
-    // typically run as Discord.exe with --type=renderer).
     for (const auto& p : procs) {
         if (iequals(p.exe_name, DISCORD_PROC_NAME)) tree.insert(p.pid);
     }
 
-    // Step 3: force-kill survivors.
     for (DWORD pid : tree) {
         if (is_alive(pid)) force_kill(pid);
     }
     return true;
 }
-
-// ============================================================================
-// launch_discord
-// ============================================================================
 
 bool launch_discord() {
     std::wstring updater = path_join(discord_root(), DISCORD_UPDATE_EXE);
@@ -233,10 +209,6 @@ bool launch_discord() {
                                 L"--processStart Discord.exe", nullptr, SW_SHOWNORMAL);
     return (INT_PTR)r > 32;
 }
-
-// ============================================================================
-// ensure_payload_files_extracted
-// ============================================================================
 
 bool ensure_payload_files_extracted() {
     std::wstring dir = install_dir();
@@ -262,13 +234,8 @@ bool ensure_payload_files_extracted() {
     return true;
 }
 
-// ============================================================================
-// apply_patch — atomic
-// ============================================================================
-
 namespace {
 
-// Strips a leading "./" if present.
 std::string strip_dot_slash(const std::string& s) {
     if (s.size() >= 2 && s[0] == '.' && (s[1] == '/' || s[1] == '\\')) return s.substr(2);
     return s;
@@ -281,13 +248,11 @@ bool apply_patch(const std::wstring& app_dir) {
     std::wstring asar_new = path_join(app_dir, ASAR_NEW_RELPATH);
     std::wstring asar_bak = path_join(app_dir, ASAR_BAK_RELPATH);
 
-    // Sanity: wait for any updater file lock to clear.
     if (!wait_for_file_unlocked(asar, FILE_LOCK_MAX_WAIT_MS)) {
         LOG_ERR("app.asar locked, giving up");
         return false;
     }
 
-    // Step 1: load.
     Asar a;
     if (!a.load(asar)) {
         LOG_ERR("Failed to parse app.asar at %ls", asar.c_str());
@@ -298,7 +263,6 @@ bool apply_patch(const std::wstring& app_dir) {
         return true;
     }
 
-    // Step 2: parse package.json to find current "main".
     auto pkg_opt = a.read_file("package.json");
     if (!pkg_opt) { LOG_ERR("package.json missing in asar"); return false; }
     Json pkg;
@@ -313,13 +277,11 @@ bool apply_patch(const std::wstring& app_dir) {
         return false;
     }
 
-    // Step 3: rename original main inside asar.
     if (!a.rename_file(main_rel_clean, ORIG_MAIN_RENAME)) {
         LOG_ERR("Rename failed");
         return false;
     }
 
-    // Step 4: rewrite package.json main field.
     pkg.set("main", Json::make_str(std::string("./") + LOADER_FILENAME));
     std::string new_pkg = pkg.dump();
     std::vector<uint8_t> new_pkg_bytes(new_pkg.begin(), new_pkg.end());
@@ -328,7 +290,6 @@ bool apply_patch(const std::wstring& app_dir) {
         return false;
     }
 
-    // Step 5: inject dnp_loader.js from embedded resource.
     auto loader_res = load_resource(IDR_DNP_LOADER);
     if (!loader_res) { LOG_ERR("Loader resource missing"); return false; }
     if (!a.write_file(LOADER_FILENAME, std::move(*loader_res))) {
@@ -336,10 +297,8 @@ bool apply_patch(const std::wstring& app_dir) {
         return false;
     }
 
-    // Step 6: sentinel.
     a.write_sentinel(SENTINEL_VERSION);
 
-    // Step 7: save to .new and verify.
     if (!a.save(asar_new)) {
         LOG_ERR("save .new failed");
         remove_file(asar_new);
@@ -366,12 +325,10 @@ bool apply_patch(const std::wstring& app_dir) {
         }
     }
 
-    // Step 8: atomic swap. ReplaceFileW keeps a backup.
     BOOL ok = ReplaceFileW(asar.c_str(), asar_new.c_str(), asar_bak.c_str(),
                            REPLACEFILE_WRITE_THROUGH, nullptr, nullptr);
     if (!ok) {
         DWORD e = GetLastError();
-        // If original doesn't exist for some reason, fall back to MoveFileEx.
         if (e == ERROR_FILE_NOT_FOUND) {
             if (!MoveFileExW(asar_new.c_str(), asar.c_str(),
                              MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
@@ -386,7 +343,6 @@ bool apply_patch(const std::wstring& app_dir) {
         }
     }
 
-    // Step 9: final verify of in-place asar.
     {
         Asar final_check;
         if (!final_check.load(asar) || !final_check.has_sentinel(SENTINEL_VERSION)) {

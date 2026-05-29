@@ -1,15 +1,4 @@
-// main.cpp — entrypoint and argv dispatch.
-//
-// Distribution model: a single standalone dnp.exe. On first double-click (run from any
-// location other than the install dir), the exe self-installs into %LOCALAPPDATA%\dnp\,
-// extracts payload, registers the logon scheduled task, patches Discord, and relaunches it.
-// Subsequent runs (from the install dir, or via the scheduled task) skip install and act as
-// daemon / launcher.
-//
-// Single-instance policy: a per-user named mutex Local\dnp_single_instance gates all modes
-// except --version. Install/uninstall/auto modes take priority — they terminate any other
-// dnp.exe instances and then acquire the mutex. Daemon/launch modes silently exit if the
-// mutex is held (another dnp.exe is already running).
+// entry point + arg handling
 #include "config.h"
 #include "installer.h"
 #include "patcher.h"
@@ -42,7 +31,6 @@ Mode parse_mode(int argc, wchar_t** argv) {
     return Mode::Auto;
 }
 
-// Is the running binary located at %LOCALAPPDATA%\dnp\dnp.exe?
 bool running_from_install_dir() {
     std::wstring self = self_exe_path();
     if (self.empty()) return false;
@@ -51,7 +39,6 @@ bool running_from_install_dir() {
 }
 
 int do_launch() {
-    // Launcher path: ensure payload extracted, patch if missing, then launch Discord.
     ensure_payload_files_extracted();
     auto app_dir = find_latest_discord_app_dir();
     if (!app_dir) {
@@ -71,17 +58,7 @@ int do_launch() {
     return 0;
 }
 
-// Privileged modes that can preempt other dnp.exe processes via the mutex acquire-or-kill path.
-// Mode::UI now plays this role for first-run double-click: it opens the control panel which the
-// user uses to drive install / uninstall manually.
-
-// Acquire the global single-instance mutex with a policy appropriate for the given mode.
-//   - Install/Uninstall/Auto: privileged — terminate any existing dnp.exe, then acquire.
-//   - Daemon/Launch: silent exit if another instance holds the mutex.
-//   - Version: no mutex.
-// Returns mutex handle to keep alive, or nullptr to indicate the caller should exit (rc=0).
-//
-// out_should_continue is set to true if execution should proceed, false to exit silently.
+// Acquire single-instance mutex. Privileged modes kill competing instances.
 HANDLE acquire_mutex_for_mode(Mode mode, bool& out_should_continue) {
     out_should_continue = true;
     if (mode == Mode::Version) return nullptr; // no gating
@@ -98,25 +75,18 @@ HANDLE acquire_mutex_for_mode(Mode mode, bool& out_should_continue) {
         return nullptr;
     }
 
-    // Privileged path: terminate other instances, then retry mutex acquire (with a short retry loop
-    // because the OS releases the mutex asynchronously after the holder process is terminated).
     kill_processes_by_name_except_self(L"dnp.exe");
     for (int i = 0; i < 50; ++i) {
         h = acquire_single_instance_mutex(SINGLE_INSTANCE_MUTEX);
         if (h) return h;
         Sleep(100);
     }
-    // Couldn't acquire even after kill — proceed anyway without mutex (best-effort).
     return nullptr;
 }
 
 } // namespace
 
 } // namespace dnp
-
-// ============================================================================
-// WinMain
-// ============================================================================
 int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
@@ -124,7 +94,6 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
     using dnp::Mode;
     Mode m = dnp::parse_mode(argc, argv);
 
-    // Single-instance gate — must happen before any side-effecting work.
     bool should_continue = true;
     HANDLE single_instance = dnp::acquire_mutex_for_mode(m, should_continue);
     if (!should_continue) {
@@ -160,9 +129,6 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
             break;
         case Mode::Auto:
         default:
-            // No args: always show the UI. Wrapped Discord shortcuts pass --launch explicitly,
-            // so they take the fast launcher path; bare double-clicks (Downloads folder, Start
-            // Menu entry created at install time, etc.) land in the control panel.
             dnp::check_for_update_and_maybe_restart();
             rc = dnp::run_ui();
             break;

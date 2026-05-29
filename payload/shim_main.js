@@ -1,11 +1,4 @@
-// shim_main.js — Discord main-process injector.
-//
-// Constructive purpose: configure each Electron BrowserWindow with a renderer-side preload script
-// that performs the premium-tier presentation override for screen-capture quality presets.
-//
-// Approach: wrap electron.BrowserWindow so every window receives our preload, chaining any
-// preload set by Discord. nodeIntegration / contextIsolation are tuned so the renderer
-// shim can access window.webpackChunkdiscord_app and the node `fs` module for diagnostics.
+// inject preload into discord windows
 
 'use strict';
 
@@ -31,8 +24,7 @@ if (!RENDERER || !fs.existsSync(RENDERER)) {
     const OrigBrowserWindow = electron.BrowserWindow;
 
     function buildChainPreload(userPreload) {
-        // Generate a per-process preload chain file that requires the user's preload (if any),
-        // then requires our renderer shim. Lives in DNP_DIR so we control cleanup.
+        // chain user preload with ours
         try {
             const chainPath = path.join(DNP_DIR, `chain_${process.pid}_${Date.now()}.js`);
             const lines = [];
@@ -67,14 +59,14 @@ if (!RENDERER || !fs.existsSync(RENDERER)) {
         }
     }
 
-    // Preserve static members and prototype linkage by replacing the export with our subclass.
+    // replace BrowserWindow export
     try {
         const desc = Object.getOwnPropertyDescriptor(electron, 'BrowserWindow') || { configurable: true };
         Object.defineProperty(electron, 'BrowserWindow', {
             configurable: true,
             enumerable: desc.enumerable !== false,
             get() { return PatchedBrowserWindow; },
-            set() { /* no-op: lock our override in */ }
+            set() { }
         });
         log('BrowserWindow override installed');
     } catch (e) {

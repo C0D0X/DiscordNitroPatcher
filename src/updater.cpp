@@ -1,4 +1,4 @@
-// updater.cpp — GitHub releases self-update over WinHTTP.
+// GitHub releases self-update
 #include "updater.h"
 #include "config.h"
 #include "util.h"
@@ -17,7 +17,6 @@ namespace dnp {
 
 namespace {
 
-// HTTPS GET via WinHTTP. Returns body bytes, fills out_status.
 bool http_get(const std::wstring& host, const std::wstring& path, std::vector<uint8_t>& out,
               int& status, const std::wstring& accept_header = L"") {
     out.clear();
@@ -35,7 +34,6 @@ bool http_get(const std::wstring& host, const std::wstring& path, std::vector<ui
                                        WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, req_flags);
     if (!req) { WinHttpCloseHandle(conn); WinHttpCloseHandle(sess); return false; }
 
-    // Auto-follow redirects (default behavior; explicit just in case).
     DWORD redir = WINHTTP_OPTION_REDIRECT_POLICY_ALWAYS;
     WinHttpSetOption(req, WINHTTP_OPTION_REDIRECT_POLICY, &redir, sizeof(redir));
 
@@ -79,7 +77,6 @@ fail:
     return false;
 }
 
-// Splits a URL of form https://host/path?query into (host, path).
 bool split_https_url(const std::wstring& url, std::wstring& host, std::wstring& path) {
     const std::wstring prefix = L"https://";
     if (url.compare(0, prefix.size(), prefix) != 0) return false;
@@ -95,7 +92,6 @@ bool split_https_url(const std::wstring& url, std::wstring& host, std::wstring& 
 }
 
 bool extract_tag_name(const std::string& body, std::string& out) {
-    // Match "tag_name":"v0.1.0" or "tag_name":"0.1.0"
     std::regex re("\"tag_name\"\\s*:\\s*\"v?([^\"]+)\"");
     std::smatch m;
     if (!std::regex_search(body, m, re)) return false;
@@ -104,8 +100,6 @@ bool extract_tag_name(const std::string& body, std::string& out) {
 }
 
 bool extract_asset_url(const std::string& body, const std::string& asset_name, std::string& out) {
-    // Match the asset block: ..."name":"<asset_name>"..."browser_download_url":"<url>"...
-    // Simplest: find the asset_name, then locate the following browser_download_url.
     size_t pos = body.find("\"name\":\"" + asset_name + "\"");
     if (pos == std::string::npos) return false;
     size_t key = body.find("\"browser_download_url\"", pos);
@@ -172,7 +166,6 @@ void check_for_update_and_maybe_restart() {
         return;
     }
 
-    // Download.
     std::wstring url_w = utf8_to_wide(asset_url);
     std::wstring host, path;
     if (!split_https_url(url_w, host, path)) return;
@@ -184,7 +177,6 @@ void check_for_update_and_maybe_restart() {
         return;
     }
 
-    // Optional: SHA-256 verify against a "sha256: <hex>" line in release body.
     {
         std::regex sha_re("sha256:\\s*([0-9a-fA-F]{64})");
         std::smatch m;
@@ -199,7 +191,6 @@ void check_for_update_and_maybe_restart() {
         }
     }
 
-    // Write to %TEMP%\dnp_new.exe.
     wchar_t tmpdir[MAX_PATH];
     DWORD n = GetTempPathW(MAX_PATH, tmpdir);
     if (n == 0 || n >= MAX_PATH) return;
@@ -213,7 +204,6 @@ void check_for_update_and_maybe_restart() {
     std::wstring self = self_exe_path();
     if (self.empty()) return;
 
-    // Schedule swap + restart via cmd.
     std::wstring cmd = L"cmd.exe /c timeout /t 2 /nobreak >nul & move /y \"";
     cmd += new_exe;
     cmd += L"\" \"";

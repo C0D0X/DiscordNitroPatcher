@@ -1,4 +1,4 @@
-// json_lite.cpp — hand-rolled JSON parser/serializer.
+// json parsing
 #include "json_lite.h"
 
 #include <cctype>
@@ -39,9 +39,6 @@ bool Json::remove(const std::string& key) {
     return false;
 }
 
-// ============================================================================
-// Parser
-// ============================================================================
 namespace {
 
 struct Parser {
@@ -99,10 +96,8 @@ struct Parser {
                             else if (h >= 'A' && h <= 'F') cp |= h - 'A' + 10;
                             else return false;
                         }
-                        // Handle surrogate pair.
                         if (cp >= 0xD800 && cp <= 0xDBFF) {
                             if (end - p < 6 || p[0] != '\\' || p[1] != 'u') {
-                                // Invalid; emit replacement.
                                 cp = 0xFFFD;
                             } else {
                                 p += 2;
@@ -119,7 +114,6 @@ struct Parser {
                                 else cp = 0x10000 + (((cp - 0xD800) << 10) | (lo - 0xDC00));
                             }
                         }
-                        // Encode as UTF-8.
                         if (cp < 0x80) {
                             out.push_back((char)cp);
                         } else if (cp < 0x800) {
@@ -157,9 +151,7 @@ struct Parser {
             v = v * 10 + (*p - '0');
             ++p;
         }
-        // Reject fractional / exponent for asar (we don't expect floats).
         if (p < end && (*p == '.' || *p == 'e' || *p == 'E')) {
-            // Tolerate by scanning to end of number but degrade to 0 — should not happen in asar.
             while (p < end && (*p == '.' || *p == 'e' || *p == 'E' ||
                                *p == '+' || *p == '-' || (*p >= '0' && *p <= '9'))) ++p;
             out = Json::make_int(0);
@@ -246,9 +238,6 @@ bool Json::parse(const char* data, size_t size) {
     return ps.p == ps.end;
 }
 
-// ============================================================================
-// Serializer
-// ============================================================================
 namespace {
 
 void emit_string(std::string& out, const std::string& s) {

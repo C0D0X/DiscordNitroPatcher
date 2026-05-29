@@ -1,4 +1,4 @@
-// shortcuts.cpp — Discord launcher wrap/unwrap implementation.
+// Discord launcher wrapper
 #include "shortcuts.h"
 #include "config.h"
 #include "json_lite.h"
@@ -21,18 +21,12 @@ namespace {
 
 constexpr const wchar_t* MANIFEST_FILE = L"launchers.json";
 
-// =====================================================================
-// COM init guard — Apartment-threaded COM for IShellLinkW.
-// =====================================================================
 struct ComInit {
     bool ok = false;
     ComInit()  { HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED); ok = SUCCEEDED(hr); }
     ~ComInit() { if (ok) CoUninitialize(); }
 };
 
-// =====================================================================
-// Manifest IO
-// =====================================================================
 std::wstring manifest_path() {
     return path_join(install_dir(), MANIFEST_FILE);
 }
@@ -51,9 +45,6 @@ bool save_manifest(const Json& m) {
     return write_file(manifest_path(), text);
 }
 
-// =====================================================================
-// Path helpers — known folder + child path
-// =====================================================================
 std::wstring known_folder(REFKNOWNFOLDERID rfid) {
     PWSTR p = nullptr;
     if (SHGetKnownFolderPath(rfid, 0, nullptr, &p) != S_OK || !p) return L"";
@@ -69,16 +60,12 @@ bool iends_with(const std::wstring& s, const std::wstring& suffix) {
 
 bool icontains(const std::wstring& s, const std::wstring& needle) {
     if (s.empty() || needle.empty()) return false;
-    // Case-insensitive substring search — naive but adequate for path matching.
     std::wstring a = s, b = needle;
     for (auto& c : a) c = (wchar_t)towlower(c);
     for (auto& c : b) c = (wchar_t)towlower(c);
     return a.find(b) != std::wstring::npos;
 }
 
-// =====================================================================
-// Shortcut helpers — read/modify .lnk via IShellLinkW + IPersistFile
-// =====================================================================
 struct LnkInfo {
     std::wstring target;
     std::wstring args;
@@ -123,7 +110,6 @@ bool write_lnk(const std::wstring& lnk_path,
         psl->Release();
         return false;
     }
-    // Load existing so we preserve icon/description/hotkey/show-state.
     bool ok = false;
     if (ppf->Load(lnk_path.c_str(), STGM_READWRITE) == S_OK) {
         if (psl->SetPath(target.c_str()) == S_OK &&
@@ -137,35 +123,25 @@ bool write_lnk(const std::wstring& lnk_path,
     return ok;
 }
 
-// Heuristic: is this a Discord launcher shortcut?
-// Match on target ending in "\\Discord\\Update.exe" (case-insensitive).
 bool is_discord_launcher_target(const std::wstring& target) {
     if (target.empty()) return false;
     return iends_with(target, L"\\Discord\\Update.exe") && icontains(target, L"\\Discord\\");
 }
 
-// =====================================================================
-// Shortcut location enumeration
-// =====================================================================
 std::vector<std::wstring> candidate_shortcut_paths() {
     std::vector<std::wstring> out;
-    // Per-user Desktop / Start Menu / Startup.
     for (REFKNOWNFOLDERID f : {FOLDERID_Desktop, FOLDERID_PublicDesktop,
                                FOLDERID_StartMenu, FOLDERID_CommonStartMenu,
                                FOLDERID_Programs, FOLDERID_CommonPrograms,
                                FOLDERID_Startup, FOLDERID_CommonStartup}) {
         std::wstring base = known_folder(f);
         if (base.empty()) continue;
-        // Direct child + "Discord Inc" subfolder variants.
         out.push_back(path_join(base, L"Discord.lnk"));
         out.push_back(path_join(base, L"Discord Inc\\Discord.lnk"));
     }
     return out;
 }
 
-// =====================================================================
-// Registry RunKey helpers
-// =====================================================================
 constexpr const wchar_t* RUNKEY_SUBKEY = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 constexpr const wchar_t* RUNKEY_VALUE  = L"Discord";
 
@@ -204,9 +180,6 @@ bool delete_runkey() {
     return rc == ERROR_SUCCESS;
 }
 
-// =====================================================================
-// Manifest entry construction
-// =====================================================================
 Json make_lnk_entry(const std::wstring& path, const LnkInfo& orig) {
     Json e = Json::make_obj();
     e.set("kind", Json::make_str("lnk"));
@@ -226,9 +199,6 @@ Json make_runkey_entry(const std::wstring& orig_value) {
 
 } // namespace
 
-// ============================================================================
-// Public: wrap
-// ============================================================================
 int wrap_all_discord_launchers(const std::wstring& dnp_exe) {
     ComInit com;
     if (!com.ok) {
@@ -236,13 +206,11 @@ int wrap_all_discord_launchers(const std::wstring& dnp_exe) {
         return 0;
     }
 
-    // Build manifest fresh on each wrap call to capture current originals.
     Json manifest = Json::make_obj();
     Json entries  = Json::make_arr();
 
     int count = 0;
 
-    // ---- Shortcuts ----
     for (const auto& path : candidate_shortcut_paths()) {
         if (!file_exists(path)) continue;
         LnkInfo orig = read_lnk(path);
@@ -251,18 +219,14 @@ int wrap_all_discord_launchers(const std::wstring& dnp_exe) {
             continue;
         }
         if (!is_discord_launcher_target(orig.target)) {
-            // Not a Discord-Update.exe shortcut — leave it alone.
             continue;
         }
-        // Already wrapped? Skip but still track for unwrap.
         if (_wcsicmp(orig.target.c_str(), dnp_exe.c_str()) == 0) {
             LOG_DBG("Already wrapped: %ls", path.c_str());
             continue;
         }
-        // Save original to manifest.
         entries.as_arr().push_back(make_lnk_entry(path, orig));
 
-        // Working dir defaults to dnp install dir.
         std::wstring wd = install_dir();
         if (write_lnk(path, dnp_exe, L"--launch", wd)) {
             LOG_INFO("Wrapped shortcut: %ls", path.c_str());
@@ -272,11 +236,9 @@ int wrap_all_discord_launchers(const std::wstring& dnp_exe) {
         }
     }
 
-    // ---- RunKey ----
     {
         std::wstring orig_value;
         if (read_runkey(orig_value)) {
-            // Heuristic same as shortcuts: only wrap if value looks like Update.exe launcher.
             if (icontains(orig_value, L"\\Discord\\Update.exe")) {
                 entries.as_arr().push_back(make_runkey_entry(orig_value));
                 std::wstring new_value = L"\"" + dnp_exe + L"\" --launch";
@@ -298,16 +260,13 @@ int wrap_all_discord_launchers(const std::wstring& dnp_exe) {
     return count;
 }
 
-// ============================================================================
-// Public: unwrap
-// ============================================================================
 int unwrap_all_discord_launchers() {
     ComInit com;
     if (!com.ok) return 0;
 
     Json manifest;
     if (!load_manifest(manifest)) {
-        LOG_DBG("No manifest — nothing to unwrap.");
+        LOG_DBG("No manifest, nothing to unwrap.");
         return 0;
     }
     const Json* entries = manifest.find("entries");
@@ -345,7 +304,6 @@ int unwrap_all_discord_launchers() {
         }
     }
 
-    // Best-effort delete manifest so a future install starts clean.
     remove_file(manifest_path());
     return restored;
 }

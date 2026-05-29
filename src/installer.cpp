@@ -1,10 +1,4 @@
-// installer.cpp — first-run install + clean uninstall.
-//
-// Architecture: NO background process. Discord launcher entry points (Desktop / Start Menu /
-// Startup .lnk files + HKCU\Run\Discord registry value) are rewritten to invoke dnp.exe --launch
-// instead of Update.exe. Every Discord launch flows through dnp.exe which patches asar on demand
-// (post-Discord-auto-update) and then spawns Update.exe normally. dnp.exe exits as soon as Update.exe
-// is spawned — no persistent process for anti-cheat scanners to flag.
+// Install and uninstall
 #include "installer.h"
 #include "config.h"
 #include "patcher.h"
@@ -30,7 +24,6 @@ bool copy_self_to_install_dir(std::wstring& out_installed_path) {
     if (!ensure_directory(dir)) return false;
     std::wstring dst = path_join(dir, L"dnp.exe");
 
-    // If we are already running from the install path, skip copy.
     if (_wcsicmp(src.c_str(), dst.c_str()) == 0) {
         out_installed_path = dst;
         return true;
@@ -40,22 +33,18 @@ bool copy_self_to_install_dir(std::wstring& out_installed_path) {
         LOG_ERR("CopyFileW failed: %lu", GetLastError());
         return false;
     }
-    // Strip mark-of-the-web on copied binary.
     std::wstring zone = dst + L":Zone.Identifier";
     DeleteFileW(zone.c_str());
     out_installed_path = dst;
     return true;
 }
 
-// Legacy cleanup: prior versions registered a scheduled task. Best-effort delete during
-// install/uninstall so upgraded users don't leave a stale task behind.
 void unregister_legacy_scheduled_task() {
     std::wstring cmd = L"schtasks.exe /delete /f /tn ";
     cmd += TASK_NAME;
     run_command(cmd, true, false);
 }
 
-// Create / remove a Start Menu shortcut "DiscordNitroPatcher.lnk" that opens the control UI.
 std::wstring start_menu_shortcut_path() {
     PWSTR p = nullptr;
     if (SHGetKnownFolderPath(FOLDERID_Programs, 0, nullptr, &p) != S_OK || !p) return L"";
@@ -67,7 +56,6 @@ std::wstring start_menu_shortcut_path() {
 bool create_start_menu_shortcut(const std::wstring& dnp_exe) {
     if (CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED) != S_OK &&
         CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED) != S_FALSE) {
-        // Tolerate already-initialized.
     }
     bool ok = false;
     IShellLinkW* psl = nullptr;
@@ -101,7 +89,6 @@ bool remove_start_menu_shortcut() {
 int do_install() {
     LOG_INFO("Install starting.");
 
-    // Wipe any task from prior daemon-era installs.
     unregister_legacy_scheduled_task();
 
     std::wstring installed_path;
@@ -114,11 +101,9 @@ int do_install() {
         return 2;
     }
 
-    // Rewrite Discord launcher entry points to flow through dnp.exe --launch.
     int wrapped = wrap_all_discord_launchers(installed_path);
     LOG_INFO("Wrapped %d Discord launcher entr%s.", wrapped, wrapped == 1 ? "y" : "ies");
 
-    // Create a Start Menu entry so the user can reopen the control panel later.
     if (create_start_menu_shortcut(installed_path)) {
         LOG_INFO("Start Menu shortcut created.");
     } else {
@@ -131,7 +116,6 @@ int do_install() {
         return 0;
     }
 
-    // Kill, patch, relaunch.
     kill_discord_processes();
     Sleep(500);
     if (!apply_patch(*app_dir)) {
@@ -148,18 +132,14 @@ int do_install() {
 int do_uninstall() {
     LOG_INFO("Uninstall starting.");
 
-    // Legacy task cleanup (no-op if none registered).
     unregister_legacy_scheduled_task();
 
-    // Stop any other dnp.exe instances (concurrent launcher, prior installer) but not this process.
     int killed = kill_processes_by_name_except_self(L"dnp.exe");
     if (killed > 0) LOG_INFO("Terminated %d other dnp.exe instance(s).", killed);
 
-    // Restore Discord launcher entry points before touching app.asar.
     int restored = unwrap_all_discord_launchers();
     LOG_INFO("Restored %d Discord launcher entr%s.", restored, restored == 1 ? "y" : "ies");
 
-    // Remove our Start Menu entry.
     remove_start_menu_shortcut();
 
     kill_discord_processes();
@@ -167,7 +147,6 @@ int do_uninstall() {
     auto app_dir = find_latest_discord_app_dir();
     if (app_dir) restore_backup(*app_dir);
 
-    // Recursive delete of install dir.
     remove_directory_recursive(install_dir());
 
     LOG_INFO("Uninstall complete.");

@@ -1,22 +1,4 @@
-// dnp_loader.js — self-contained main-process shim embedded inside Discord's app.asar.
-//
-// Constructive purpose: client-side override of the locally-reported premium tier and the
-// screen-capture quality manager parameters so the local user's stream-quality picker presents
-// the full set of presets (1080p60 / 1440p60 / 4K60) and so the local capture pipeline allows
-// higher bitrate/resolution/framerate values that Discord's own client would otherwise clamp.
-//
-// Architecture:
-//   1. This file runs as the main-process entry point because dnp's patcher set package.json
-//      "main": "./dnp_loader.js" (the original main was renamed to ./app_original_main.js).
-//   2. We override electron.BrowserWindow so every renderer window receives our preload script.
-//      The preload source is embedded below as a string literal and written to disk on each boot.
-//   3. The preload, running in the renderer with nodeIntegration enabled, hooks Discord's
-//      Webpack chunk array, walks the module factory map, and applies in-place patches to
-//      UserStore / UserProfileStore / video quality / stream-settings validator.
-//   4. Finally we require ./app_original_main.js so Discord boots normally.
-//
-// Reliability: all paths derive from os.homedir() — no reliance on env vars that can be stripped.
-// All operations are wrapped so any failure leaves Discord booting unpatched, never broken.
+// main loader for dnp - patch discord nitro features
 
 'use strict';
 
@@ -25,7 +7,7 @@
     const fs   = require('fs');
     const os   = require('os');
 
-    // Derive %LOCALAPPDATA%\dnp paths from homedir to avoid env-var reliance.
+    // use homedir for paths, not env vars
     const LOCAL_APP_DATA = path.join(os.homedir(), 'AppData', 'Local');
     const DNP_DIR        = path.join(LOCAL_APP_DATA, 'dnp');
     const LOG_FILE       = path.join(DNP_DIR, 'log.txt');
@@ -38,15 +20,13 @@
                 LOG_FILE,
                 `${new Date().toISOString()} [${prefix}] ${msg}\n`
             );
-        } catch (_) { /* swallow — never let logging break boot */ }
+        } catch (_) { /* dont break boot */ }
     }
 
     diag('loader', 'main-process loader executing, pid=' + process.pid);
 
-    // -------- Renderer source (embedded string literal) --------
-    // Written to disk on each main-process boot so BrowserWindow.preload can reference it.
+    // renderer code embedded here
     const RENDERER_SOURCE = `
-// shim_renderer.js — runs as preload in each Discord renderer.
 'use strict';
 (function () {
     const PREMIUM_TIER_NITRO = 2;
@@ -78,8 +58,7 @@
         patchedMaxFileSize: false,
     };
 
-    // Public diagnostic — readable via DevTools console as window.__dnp_status to confirm
-    // patch outcome on each Discord build without needing log file access.
+    // public status object for debugging
     try {
         if (!window.__dnp_status) {
             window.__dnp_status = {
@@ -113,9 +92,7 @@
         } catch (_) {}
     }
 
-    // Generic Webpack module finder.
-    // Walks the factory map (wpRequire.m), filters by source-code substrings, then instantiates
-    // the matching factory and probes each common export shape for the required own/prototype keys.
+    // find webpack modules by code search
     function findExport(codeNeedles, candidatePicker) {
         if (!wpRequire || !wpRequire.m) return null;
         const factories = wpRequire.m;
@@ -123,7 +100,7 @@
             const fn = factories[id];
             if (typeof fn !== 'function') continue;
             let src;
-            try { src = fn.toString(); } catch (_) { continue; }
+            try { src = fn.toString(); } catch (_) {}
             if (!codeNeedles.every(n => src.includes(n))) continue;
             try {
                 const ex = wpRequire(id);
@@ -133,12 +110,11 @@
                     const hit = candidatePicker(c);
                     if (hit) return hit;
                 }
-            } catch (_) { /* instantiation failed; skip */ }
+            } catch (_) {}
         }
         return null;
     }
 
-    // -------- Patches --------
     function patchUserStore() {
         if (state.userStore) return;
         const store = findExport(
@@ -162,7 +138,7 @@
             }
             return u;
         };
-        // Mutate cached current user immediately so any synchronous reads see Nitro tier.
+        // patch current user in place
         try {
             const cur = store.getCurrentUser();
             if (cur) { state.currentUserId = cur.id; cur.premiumType = PREMIUM_TIER_NITRO; }
@@ -194,8 +170,7 @@
 
     function patchVideoQuality() {
         if (state.patchedVideoQuality) return;
-        // YABDP4Nitro targets the prototype.updateVideoQuality method on the videoOptionFunctions
-        // class. We find it by walking factories whose source contains 'updateVideoQuality'.
+        // find and patch updateVideoQuality
         const cls = findExport(
             ['updateVideoQuality'],
             c => (c && c.prototype && typeof c.prototype.updateVideoQuality === 'function') ? c : null
@@ -207,10 +182,10 @@
                 const e = this;
                 if (e && e.videoQualityManager && e.videoQualityManager.options) {
                     const opts = e.videoQualityManager.options;
-                    // Floor / target / max (kbps -> bps conversion handled by raising directly).
+                    // set min/target/max bitrate
                     const MIN_BPS    = 500000;     // 500 kbps floor
                     const TARGET_BPS = 8000000;    // 8 Mbps target
-                    const MAX_BPS    = 25000000;   // 25 Mbps max — matches Nitro Source preset
+                    const MAX_BPS    = 25000000;   // 25 Mbps cap
                     opts.videoBitrateFloor = MIN_BPS;
                     if (opts.videoBitrate)   { opts.videoBitrate.min   = MIN_BPS; opts.videoBitrate.max   = MAX_BPS; }
                     if (opts.desktopBitrate) { opts.desktopBitrate.min = MIN_BPS;
@@ -220,7 +195,7 @@
                         e.videoQualityManager.goliveMaxQuality.bitrateMax = MAX_BPS;
                     }
                 }
-                // Lift framerate cap to whatever stream parameters allow.
+                // uncap framerate
                 if (e && e.videoStreamParameters && e.videoStreamParameters[0]) {
                     const sp = e.videoStreamParameters[0];
                     if (sp.maxFrameRate && e.videoQualityManager && e.videoQualityManager.options) {
@@ -230,7 +205,7 @@
                         if (e.videoQualityManager.options.videoCapture)
                             e.videoQualityManager.options.videoCapture.framerate = fps;
                     }
-                    // Resolution: pin to maxResolution from stream params (Nitro tier ceiling).
+                    // set max resolution
                     if (sp.maxResolution && e.videoQualityManager) {
                         const w = sp.maxResolution.width  || 2560;
                         const h = sp.maxResolution.height || 1440;
@@ -239,7 +214,7 @@
                         e.remoteSinkWantsMaxFramerate = fps;
                         e.videoQualityManager.options.videoBudget  = vq;
                         e.videoQualityManager.options.videoCapture = vq;
-                        // Quality ladder recomputation requires LadderModule — best-effort.
+                        // update pixel budget if possible
                         try {
                             const pxBudget = w * h;
                             if (e.videoQualityManager.ladder) {
@@ -258,14 +233,13 @@
 
     function patchStreamSettingsValidator() {
         if (state.patchedStreamSettings) return;
-        // Discord's InvalidStreamSettingsModal exports an areStreamSettingsAllowed function
-        // (often a mangled name). YABDP4Nitro identifies it by the source needles below.
+        // find and bypass stream settings validation
         const mod = findExport(
             ['preset)&&', 'resolution&&', 'fps&&'],
             c => c
         );
         if (!mod) return;
-        // Find any method on the module that takes settings and returns boolean — replace with const true.
+        // replace with function that always returns true
         for (const key in mod) {
             if (typeof mod[key] !== 'function') continue;
             try {
@@ -311,14 +285,13 @@
         try { patchMaxFileSize(); }            catch (e) { log('maxfilesize err: ' + e.message); }
     }
 
-    // -------- Webpack hook --------
     function attach(arr, name) {
         if (!arr || typeof arr.push !== 'function') return;
         if (arr.__dnp_attached) return;
         arr.__dnp_attached = true;
         setStatus('chunkArrayName', name || 'unknown');
 
-        // Inject a synthetic chunk so we capture a reference to Discord's __webpack_require__.
+        // get webpack require reference
         try {
             const tag = 'dnp_capture_' + Math.random().toString(36).slice(2);
             arr.push([
@@ -343,8 +316,7 @@
         log('chunk array hook attached (' + name + ')');
     }
 
-    // Auto-detect: scan window for any existing webpackChunk* property holding an Array.
-    // Future-proof against Discord renaming 'webpackChunkdiscord_app' to anything else.
+    // auto-detect chunk array by name pattern
     function findExistingChunkArray() {
         try {
             for (const k of Object.keys(window)) {
@@ -360,12 +332,11 @@
     }
 
     function install() {
-        // Path 1: if a chunk array already exists, attach immediately.
+        // check for existing chunk array
         const found = findExistingChunkArray();
         if (found) { attach(found.arr, found.name); return; }
 
-        // Path 2: install setter for the historically-stable name. Fires synchronously when
-        // Discord's runtime initializes its chunk array.
+        // install setter on property name
         try {
             Object.defineProperty(window, 'webpackChunkdiscord_app', {
                 configurable: true,
@@ -384,14 +355,12 @@
 
     try { install(); } catch (e) { pushErr(e); log('install err: ' + (e && e.message)); }
 
-    // Periodic re-scan + sweep. Two responsibilities:
-    //   1. Catch chunk arrays created under a name we didn't anticipate (Discord rename).
-    //   2. Re-sweep so modules loaded after the initial chunk burst get patched.
+    // rescan and repatch periodically
     let ticks = 0;
     const iv = setInterval(function () {
         ticks++;
         setStatus('ticks', ticks);
-        // Detect late-arriving chunk arrays under any name.
+        // check for new chunk arrays
         if (!wpRequire) {
             const f = findExistingChunkArray();
             if (f) attach(f.arr, f.name);
@@ -405,7 +374,6 @@
 })();
 `;
 
-    // -------- Main process setup --------
     try {
         if (!fs.existsSync(DNP_DIR)) fs.mkdirSync(DNP_DIR, { recursive: true });
         fs.writeFileSync(RENDERER_PATH, RENDERER_SOURCE);
@@ -420,8 +388,7 @@
 
         const OrigBrowserWindow = electron.BrowserWindow;
 
-        // Wrap webPreferences to inject our preload + relax isolation enough for the renderer
-        // to access window.webpackChunkdiscord_app and use node fs for diagnostics.
+        // inject preload and relax sandbox
         function patchOpts(opts) {
             opts = opts || {};
             opts.webPreferences = opts.webPreferences || {};
@@ -445,15 +412,14 @@
             return opts;
         }
 
-        // PatchedBrowserWindow is a constructor wrapper that mutates webPreferences before super().
-        // Using `extends` keeps prototype chain identity intact so Discord's instanceof checks pass.
+        // extend BrowserWindow to patch options
         class PatchedBrowserWindow extends OrigBrowserWindow {
             constructor(opts) {
                 diag('loader', 'PatchedBrowserWindow instantiated');
                 super(patchOpts(opts));
             }
         }
-        // Preserve static members (BrowserWindow.fromWebContents, BrowserWindow.getAllWindows, ...).
+        // copy static methods
         for (const k of Object.getOwnPropertyNames(OrigBrowserWindow)) {
             if (k === 'length' || k === 'name' || k === 'prototype') continue;
             try {
@@ -462,10 +428,7 @@
             } catch (_) {}
         }
 
-        // Electron 37 marks electron.BrowserWindow non-configurable, so Object.defineProperty
-        // on the exports object fails. Instead intercept Module._load: when downstream code
-        // requires 'electron', return a Proxy that yields PatchedBrowserWindow for the
-        // BrowserWindow property and forwards everything else to the real module.
+        // hook Module._load to proxy electron.BrowserWindow
         try {
             const Module = require('module');
             const electronProxy = new Proxy(electron, {
@@ -494,17 +457,14 @@
             diag('loader', 'Module._load hook err: ' + (e && e.message));
         }
 
-        // Defense in depth: catch any window that slips past the proxy (e.g. created via direct
-        // reference Discord already destructured before our hook ran).
+        // fallback for windows created before hook
         try {
             electron.app.on('browser-window-created', (_event, win) => {
                 diag('loader', 'browser-window-created event fired');
                 try {
                     const wc = win.webContents;
                     if (!wc) return;
-                    // Best-effort: inject the renderer source via executeJavaScript at the
-                    // earliest possible renderer event. The preload path above is the
-                    // primary mechanism; this is a fallback for unhooked windows.
+                    // fallback inject for missed windows
                     wc.on('dom-ready', () => {
                         wc.executeJavaScript(RENDERER_SOURCE).catch(err => {
                             diag('loader', 'executeJavaScript fallback err: ' + (err && err.message));
@@ -519,7 +479,7 @@
         diag('loader', 'electron setup outer err: ' + (e && e.stack || e));
     }
 
-    // Always hand off to Discord's original main, regardless of any failure above.
+    // require original discord main
     try {
         require('./app_original_main.js');
     } catch (e) {

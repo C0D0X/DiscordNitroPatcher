@@ -1,52 +1,33 @@
-// shim_renderer.js — runs in each Discord renderer process as a preload script.
-//
-// Constructive purpose: client-side premium-tier override for screen-capture quality presets.
-// Discord's renderer reads the local user's premiumType to decide which resolution / framerate /
-// bitrate options are presented in the stream-quality picker. This shim overrides the locally
-// reported tier so the picker presents the full set of presets.
-//
-// Strategy:
-//   1. Install a setter on window.webpackChunkdiscord_app BEFORE Discord populates it.
-//   2. When Discord's chunk array materializes, push a synthetic chunk whose entry callback
-//      hands us a live reference to Discord's __webpack_require__.
-//   3. After each subsequent chunk push, walk the module factory map and look for factories
-//      whose source contains the premium-tier accessor identifiers. Instantiate the module
-//      to get its live exports and replace the accessor in place.
-//   4. Two targets:
-//        a. UserPremiumStore.getPremiumType  → returns Nitro tier.
-//        b. UserStore.getCurrentUser         → returns user object with premiumType overlayed.
-//
-// Reliability: matches by factory source substring (not pinned module IDs), so Webpack
-// reshuffles between Discord releases don't break the patch. Fail-safe wrapped in try/catch.
+// renderer preload for nitro patch
 
 'use strict';
 
 (function () {
     const PREMIUM_TIER_NITRO = 2;
 
-    // -------- Logging (best-effort; renderer has nodeIntegration=true via shim_main) --------
+    // logging
     let fs, path, logPath;
     try {
         fs = require('fs');
         path = require('path');
         const lad = process.env && process.env.LOCALAPPDATA;
         if (lad) logPath = path.join(lad, 'dnp', 'log.txt');
-    } catch (_) { /* fs unavailable */ }
+    } catch (_) { }
 
     function log(msg) {
         if (!fs || !logPath) return;
         try {
             fs.appendFileSync(logPath, `[shim_renderer] ${new Date().toISOString()} ${msg}\n`);
-        } catch (_) { /* swallow */ }
+        } catch (_) { }
     }
 
-    // -------- Webpack handle + patch state --------
+    // state
     let wpRequire     = null;
     let patchedPremium = false;
     let patchedUser    = false;
     const seenIds = new Set();
 
-    // Probe a module factory for the two target accessors.
+    // check module for patch targets
     function probe(id, src) {
         if (typeof src !== 'string') return;
 
@@ -58,7 +39,7 @@
         try { mod = wpRequire(id); } catch (e) { return; }
         if (!mod) return;
 
-        // Webpack export shapes vary across builds.
+        // check different export patterns
         const candidates = [
             mod,
             mod.default,
@@ -115,7 +96,7 @@
         }
     }
 
-    // -------- Hook the Webpack chunk array --------
+    // hook chunks
     function attach(arr) {
         if (!arr || typeof arr.push !== 'function') return;
         try {
@@ -148,7 +129,7 @@
                 attach(existing);
                 return;
             }
-        } catch (_) { /* not yet defined */ }
+        } catch (_) { }
 
         Object.defineProperty(window, 'webpackChunkdiscord_app', {
             configurable: true,
@@ -159,7 +140,7 @@
                         writable: true,
                         value: v,
                     });
-                } catch (_) { /* fallback */ }
+                } catch (_) { }
                 attach(v);
             }
         });

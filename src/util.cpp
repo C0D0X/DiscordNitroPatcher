@@ -1,4 +1,4 @@
-// util.cpp — implementations of shared utilities.
+// helper functions
 #include "util.h"
 #include "config.h"
 
@@ -17,10 +17,6 @@
 #pragma comment(lib, "bcrypt.lib")
 
 namespace dnp {
-
-// ============================================================================
-// Path helpers
-// ============================================================================
 
 std::wstring local_app_data() {
     PWSTR p = nullptr;
@@ -51,7 +47,6 @@ std::wstring path_join(std::wstring a, std::wstring b) {
 
 bool ensure_directory(const std::wstring& dir) {
     if (dir.empty()) return false;
-    // SHCreateDirectoryExW creates intermediate dirs.
     int rc = SHCreateDirectoryExW(nullptr, dir.c_str(), nullptr);
     return rc == ERROR_SUCCESS || rc == ERROR_ALREADY_EXISTS || rc == ERROR_FILE_EXISTS;
 }
@@ -63,7 +58,6 @@ bool file_exists(const std::wstring& path) {
 
 bool remove_file(const std::wstring& path) {
     if (!file_exists(path)) return true;
-    // Clear read-only just in case.
     DWORD a = GetFileAttributesW(path.c_str());
     if (a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_READONLY)) {
         SetFileAttributesW(path.c_str(), a & ~FILE_ATTRIBUTE_READONLY);
@@ -73,8 +67,6 @@ bool remove_file(const std::wstring& path) {
 
 bool remove_directory_recursive(const std::wstring& dir) {
     if (dir.empty()) return false;
-    // SHFileOperationW with FO_DELETE + FOF_NO_UI is the simplest reliable recursive delete.
-    // Buffer must be double-null-terminated.
     std::wstring buf = dir;
     buf.push_back(L'\0');
     buf.push_back(L'\0');
@@ -84,10 +76,6 @@ bool remove_directory_recursive(const std::wstring& dir) {
     op.fFlags = FOF_NO_UI | FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_SILENT;
     return SHFileOperationW(&op) == 0;
 }
-
-// ============================================================================
-// File IO
-// ============================================================================
 
 std::optional<std::vector<uint8_t>> read_file(const std::wstring& path) {
     HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
@@ -149,10 +137,6 @@ bool wait_for_file_unlocked(const std::wstring& path, int max_wait_ms) {
     return false;
 }
 
-// ============================================================================
-// Encoding
-// ============================================================================
-
 std::wstring utf8_to_wide(const std::string& s) {
     if (s.empty()) return L"";
     int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), nullptr, 0);
@@ -170,10 +154,6 @@ std::string wide_to_utf8(const std::wstring& s) {
     WideCharToMultiByte(CP_UTF8, 0, s.data(), (int)s.size(), out.data(), n, nullptr, nullptr);
     return out;
 }
-
-// ============================================================================
-// SHA-256 via bcrypt
-// ============================================================================
 
 std::string sha256_hex(const void* data, size_t size) {
     BCRYPT_ALG_HANDLE alg = nullptr;
@@ -218,14 +198,8 @@ std::string sha256_hex(const std::vector<uint8_t>& data) {
     return sha256_hex(data.data(), data.size());
 }
 
-// ============================================================================
-// Embedded resource extraction
-// ============================================================================
-
 std::optional<std::vector<uint8_t>> load_resource(int resource_id) {
     HMODULE mod = GetModuleHandleW(nullptr);
-    // RT_RCDATA expands to MAKEINTRESOURCE(10) which is ANSI when UNICODE isn't defined.
-    // FindResourceW requires LPCWSTR for the type parameter, so spell out MAKEINTRESOURCEW(10).
     HRSRC res = FindResourceW(mod, MAKEINTRESOURCEW(resource_id), MAKEINTRESOURCEW(10));
     if (!res) return std::nullopt;
     DWORD size = SizeofResource(mod, res);
@@ -235,10 +209,6 @@ std::optional<std::vector<uint8_t>> load_resource(int resource_id) {
     if (!p) return std::nullopt;
     return std::vector<uint8_t>((uint8_t*)p, (uint8_t*)p + size);
 }
-
-// ============================================================================
-// Process spawn
-// ============================================================================
 
 int run_command(const std::wstring& cmdline, bool wait, bool show_window) {
     STARTUPINFOW si = {};
@@ -300,22 +270,16 @@ int kill_processes_by_name_except_self(const std::wstring& exe_name) {
 }
 
 HANDLE acquire_single_instance_mutex(const wchar_t* name) {
-    // Local\ namespace = per-session, per-user — sufficient for friends-tier use.
     SetLastError(ERROR_SUCCESS);
     HANDLE h = CreateMutexW(nullptr, TRUE, name);
     DWORD e = GetLastError();
     if (!h) return nullptr;
     if (e == ERROR_ALREADY_EXISTS) {
-        // Another instance owns it. Release our handle and report busy.
         CloseHandle(h);
         return nullptr;
     }
     return h;
 }
-
-// ============================================================================
-// Logging
-// ============================================================================
 
 namespace {
 HANDLE g_log_file = INVALID_HANDLE_VALUE;
@@ -328,7 +292,6 @@ void rotate_if_needed() {
     LARGE_INTEGER sz{};
     if (!GetFileSizeEx(g_log_file, &sz)) return;
     if ((size_t)sz.QuadPart < LOG_MAX_BYTES) return;
-    // Truncate to keep only second half — preserve recent.
     LONG zero = 0;
     LARGE_INTEGER half;
     half.QuadPart = sz.QuadPart / 2;
@@ -359,7 +322,6 @@ void log_init() {
         if (AllocConsole()) {
             g_log_console = GetStdHandle(STD_OUTPUT_HANDLE);
             SetConsoleOutputCP(CP_UTF8);
-            // Tag the console for sanity.
             const char* hdr = "DiscordNitroPatcher (DEV_MODE)\n";
             DWORD w = 0;
             WriteFile(g_log_console, hdr, (DWORD)strlen(hdr), &w, nullptr);
@@ -378,10 +340,9 @@ void log_shutdown() {
 }
 
 void log_write(int level, const char* fmt, ...) {
-    if (!DEV_MODE && level > 1) return; // release: errors + warnings only
+    if (!DEV_MODE && level > 1) return;
     if (!g_log_inited) log_init();
 
-    // Format message.
     char msg[2048];
     va_list ap;
     va_start(ap, fmt);
@@ -389,8 +350,6 @@ void log_write(int level, const char* fmt, ...) {
     va_end(ap);
     if (n < 0) return;
     if ((size_t)n >= sizeof(msg) - 2) n = (int)sizeof(msg) - 3;
-
-    // Prefix with timestamp + level.
     SYSTEMTIME st;
     GetLocalTime(&st);
     static const char* tags[] = {"ERR ", "WARN", "INFO", "DBG "};

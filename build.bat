@@ -33,7 +33,7 @@ if errorlevel 1 (
 )
 
 rem Compile and link.
-cl /nologo /std:c++17 /O2 /MT /GS- /GL /EHsc /GR- /W3 ^
+cl /nologo /std:c++17 /utf-8 /O2 /MT /GS- /GL /EHsc /GR- /W3 ^
    /D _CRT_SECURE_NO_WARNINGS ^
    /I src ^
    src\main.cpp src\util.cpp src\json_lite.cpp src\asar.cpp src\patcher.cpp ^

@@ -1,7 +1,4 @@
-// json_lite.h — minimal JSON tree for asar header manipulation.
-//
-// Supports null, bool, int64, string, array, object. No floats (asar uses integer sizes;
-// offsets are stored as strings). Objects preserve insertion order for round-trip stability.
+// json tree
 #pragma once
 
 #include <cstdint>
@@ -39,15 +36,10 @@ public:
     std::vector<std::pair<std::string, Json>>&              as_obj()        { return obj_; }
     const std::vector<std::pair<std::string, Json>>&        as_obj()  const { return obj_; }
 
-    // Object helpers
     Json*       find(const std::string& key);
     const Json* find(const std::string& key) const;
-    // Set: replaces value if key exists, else appends.
     void        set(const std::string& key, Json v);
-    // Remove: erases the key if present; returns true if removed.
     bool        remove(const std::string& key);
-
-    // Parse / serialize. Returns true on success.
     bool        parse(const std::string& text);
     bool        parse(const char* data, size_t size);
     std::string dump() const;
