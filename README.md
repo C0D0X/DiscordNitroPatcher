@@ -1,7 +1,7 @@
 # DiscordNitroPatcher
 
 Small Windows tool that patches the local Discord client so screenshare / Go Live
-runs at higher quality (up to 1080p60, ~25 Mbps) without a Nitro subscription.
+runs at higher quality (up to 1440p60, ~25 Mbps) without a Nitro subscription.
 
 It works by editing Discord's `app.asar` to load a small JavaScript file that
 raises the video bitrate and framerate caps and flips the client-side premium
