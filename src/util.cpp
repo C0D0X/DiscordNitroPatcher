@@ -315,8 +315,12 @@ void log_init() {
     std::wstring dir = install_dir();
     ensure_directory(dir);
     std::wstring path = path_join(dir, utf8_to_wide(LOG_FILE));
+    // CREATE_ALWAYS truncates the file on every session start so the log
+    // never carries noise from prior runs. rotate_if_needed() still trims
+    // long-lived sessions (e.g. UI left open for days) when LOG_MAX_BYTES
+    // is exceeded.
     g_log_file = CreateFileW(path.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ,
-                             nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+                             nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
 
     if (DEV_MODE) {
         if (AllocConsole()) {
