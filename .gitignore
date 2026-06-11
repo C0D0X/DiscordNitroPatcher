@@ -30,3 +30,4 @@ desktop.ini
 local/
 cluade.bat
 claude.bat
+_build_*.bat

@@ -1,4 +1,6 @@
-// GitHub releases self-update
+// GitHub releases self-update.
+//
+// See updater.h for the non-disruptive staging model.
 #include "updater.h"
 #include "config.h"
 #include "util.h"
@@ -9,6 +11,7 @@
 #include <cstring>
 #include <regex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #pragma comment(lib, "winhttp.lib")
@@ -16,6 +19,9 @@
 namespace dnp {
 
 namespace {
+
+// Throttle update checks; GitHub unauthenticated API limit is 60/hr per IP.
+constexpr ULONGLONG UPDATE_CHECK_INTERVAL_SEC = 6ULL * 60ULL * 60ULL;
 
 bool http_get(const std::wstring& host, const std::wstring& path, std::vector<uint8_t>& out,
               int& status, const std::wstring& accept_header = L"") {
@@ -25,6 +31,10 @@ bool http_get(const std::wstring& host, const std::wstring& path, std::vector<ui
                                  WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
                                  WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!sess) return false;
+
+    // Modest timeouts so a stalled network never blocks the background thread for long.
+    DWORD t_resolve = 5'000, t_connect = 5'000, t_send = 15'000, t_recv = 30'000;
+    WinHttpSetTimeouts(sess, t_resolve, t_connect, t_send, t_recv);
 
     HINTERNET conn = WinHttpConnect(sess, host.c_str(), INTERNET_DEFAULT_HTTPS_PORT, 0);
     if (!conn) { WinHttpCloseHandle(sess); return false; }
@@ -133,14 +143,59 @@ void strip_zone_identifier(const std::wstring& path) {
     DeleteFileW(zone.c_str());
 }
 
-} // namespace
+std::wstring installed_self_path() { return path_join(install_dir(), L"dnp.exe"); }
+std::wstring staged_update_path() { return path_join(install_dir(), L"dnp.exe.new"); }
+std::wstring old_self_path()      { return path_join(install_dir(), L"dnp.exe.old"); }
+std::wstring throttle_marker()    { return path_join(install_dir(), L".dnp_update_check"); }
 
-void check_for_update_and_maybe_restart() {
-    if (DEV_MODE) {
-        LOG_DBG("Update check skipped (DEV_MODE).");
-        return;
+bool running_as_installed() {
+    std::wstring self = self_exe_path();
+    if (self.empty()) return false;
+    return _wcsicmp(self.c_str(), installed_self_path().c_str()) == 0;
+}
+
+// Returns true if the throttle window has elapsed. Touches the marker as a side effect.
+bool throttle_allows_check() {
+    std::wstring marker = throttle_marker();
+    WIN32_FILE_ATTRIBUTE_DATA fad{};
+    if (GetFileAttributesExW(marker.c_str(), GetFileExInfoStandard, &fad)) {
+        FILETIME ftnow;
+        GetSystemTimeAsFileTime(&ftnow);
+        ULARGE_INTEGER a{}, b{};
+        a.LowPart  = fad.ftLastWriteTime.dwLowDateTime;
+        a.HighPart = fad.ftLastWriteTime.dwHighDateTime;
+        b.LowPart  = ftnow.dwLowDateTime;
+        b.HighPart = ftnow.dwHighDateTime;
+        if (b.QuadPart > a.QuadPart) {
+            ULONGLONG elapsed_100ns = b.QuadPart - a.QuadPart;
+            ULONGLONG elapsed_sec   = elapsed_100ns / 10'000'000ULL;
+            if (elapsed_sec < UPDATE_CHECK_INTERVAL_SEC) return false;
+        }
     }
+    // Touch (create or overwrite) the marker.
+    HANDLE h = CreateFileW(marker.c_str(), GENERIC_WRITE,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           nullptr, CREATE_ALWAYS,
+                           FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h != INVALID_HANDLE_VALUE) {
+        FILETIME ftnow;
+        GetSystemTimeAsFileTime(&ftnow);
+        SetFileTime(h, nullptr, nullptr, &ftnow);
+        CloseHandle(h);
+    }
+    return true;
+}
 
+// Sentinel: if the staged file's version equals the running version, drop it.
+// Prevents an infinite "re-stage / re-apply" loop when a prior tag matches us.
+bool staged_matches_current(const std::wstring& staged) {
+    // Cheap heuristic: a freshly-staged file under 4 KiB is junk.
+    auto data = read_file(staged);
+    if (!data || data->size() < 4096) return true;
+    return false;
+}
+
+void stage_update_blocking() {
     std::vector<uint8_t> resp;
     int status = 0;
     if (!http_get(UPDATE_HOST, UPDATE_PATH, resp, status) || status != 200) {
@@ -156,16 +211,18 @@ void check_for_update_and_maybe_restart() {
     }
     if (!newer_than_current(tag)) {
         LOG_DBG("Already at latest: %s", tag.c_str());
+        // Drop any leftover stale stage from a prior version.
+        std::wstring staged = staged_update_path();
+        if (file_exists(staged)) DeleteFileW(staged.c_str());
         return;
     }
-    LOG_INFO("Update available: %s", tag.c_str());
+    LOG_INFO("Update available: %s (staging)", tag.c_str());
 
     std::string asset_url;
     if (!extract_asset_url(body, wide_to_utf8(UPDATE_ASSET_NAME), asset_url)) {
         LOG_WARN("No %ls asset in release.", UPDATE_ASSET_NAME);
         return;
     }
-
     std::wstring url_w = utf8_to_wide(asset_url);
     std::wstring host, path;
     if (!split_https_url(url_w, host, path)) return;
@@ -177,6 +234,7 @@ void check_for_update_and_maybe_restart() {
         return;
     }
 
+    // Optional SHA-256 attestation: looks for `sha256: <64hex>` anywhere in the release body.
     {
         std::regex sha_re("sha256:\\s*([0-9a-fA-F]{64})");
         std::smatch m;
@@ -191,30 +249,107 @@ void check_for_update_and_maybe_restart() {
         }
     }
 
-    wchar_t tmpdir[MAX_PATH];
-    DWORD n = GetTempPathW(MAX_PATH, tmpdir);
-    if (n == 0 || n >= MAX_PATH) return;
-    std::wstring new_exe = path_join(std::wstring(tmpdir, n), L"dnp_new.exe");
-    if (!write_file(new_exe, bin)) {
-        LOG_ERR("write new exe failed");
+    // Stage atomically: write to .new.tmp, then rename to .new.
+    std::wstring staged = staged_update_path();
+    std::wstring tmp    = staged + L".tmp";
+    if (!write_file(tmp, bin)) {
+        LOG_ERR("write staged update failed (%lu)", GetLastError());
         return;
     }
-    strip_zone_identifier(new_exe);
+    strip_zone_identifier(tmp);
+    if (!MoveFileExW(tmp.c_str(), staged.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+        LOG_ERR("Stage rename failed: %lu", GetLastError());
+        DeleteFileW(tmp.c_str());
+        return;
+    }
+    LOG_INFO("Staged update %s at %ls (applies on next launch).", tag.c_str(), staged.c_str());
+}
 
-    std::wstring self = self_exe_path();
-    if (self.empty()) return;
+} // namespace
 
-    std::wstring cmd = L"cmd.exe /c timeout /t 2 /nobreak >nul & move /y \"";
-    cmd += new_exe;
-    cmd += L"\" \"";
-    cmd += self;
-    cmd += L"\" & start \"\" \"";
-    cmd += self;
-    cmd += L"\"";
+void start_background_update_check() {
+    if (DEV_MODE) {
+        LOG_DBG("Update check skipped (DEV_MODE).");
+        return;
+    }
+    if (!running_as_installed()) {
+        LOG_DBG("Update check skipped (not running from install dir).");
+        return;
+    }
+    if (!throttle_allows_check()) {
+        LOG_DBG("Update check skipped (throttled).");
+        return;
+    }
+    // Detached worker: any in-flight download is cut at process exit; the
+    // next startup will simply try again.
+    // Detached worker. Any throw is swallowed so the updater can never
+    // crash the host process. /EHsc means we only catch C++ exceptions;
+    // a hardware fault would still terminate, which is acceptable given
+    // the narrow code surface here (winhttp + regex + file IO).
+    std::thread([] {
+        try {
+            stage_update_blocking();
+        } catch (...) {
+            LOG_WARN("Updater thread swallowed exception.");
+        }
+    }).detach();
+}
 
-    run_command(cmd, false, false);
-    LOG_INFO("Scheduled update swap. Exiting.");
-    ExitProcess(0);
+bool apply_pending_update_if_any() {
+    if (!running_as_installed()) return false;
+
+    std::wstring self     = self_exe_path();
+    std::wstring expected = installed_self_path();
+    std::wstring staged   = staged_update_path();
+    std::wstring oldp     = old_self_path();
+
+    // Clean up the previous swap's leftover (the file is unlocked once the
+    // prior process exited).
+    if (file_exists(oldp)) DeleteFileW(oldp.c_str());
+
+    if (!file_exists(staged)) return false;
+
+    if (staged_matches_current(staged)) {
+        LOG_WARN("Staged update invalid; discarding.");
+        DeleteFileW(staged.c_str());
+        return false;
+    }
+
+    // Windows permits renaming a running executable on the same volume
+    // because the binding is to the open section, not the directory entry.
+    DeleteFileW(oldp.c_str());
+    if (!MoveFileExW(self.c_str(), oldp.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+        LOG_WARN("Rename self -> .old failed: %lu", GetLastError());
+        return false;
+    }
+    if (!MoveFileExW(staged.c_str(), expected.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+        LOG_ERR("Rename .new -> exe failed: %lu", GetLastError());
+        // Roll back so we don't end up with no exe at the canonical path.
+        MoveFileExW(oldp.c_str(), self.c_str(), MOVEFILE_REPLACE_EXISTING);
+        return false;
+    }
+    LOG_INFO("Applied staged update; re-launching new exe.");
+
+    // Re-exec with the original command line (CreateProcessW mutates the
+    // buffer it receives, hence the writable copy).
+    std::wstring cmdline = GetCommandLineW();
+    std::vector<wchar_t> mut(cmdline.begin(), cmdline.end());
+    mut.push_back(0);
+
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+    BOOL ok = CreateProcessW(expected.c_str(), mut.data(), nullptr, nullptr,
+                             FALSE, 0, nullptr, install_dir().c_str(), &si, &pi);
+    if (!ok) {
+        LOG_ERR("CreateProcess(new exe) failed: %lu", GetLastError());
+        // The new exe is in place but we couldn't launch it; the user's
+        // next manual launch will still pick it up.
+        return false;
+    }
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return true;
 }
 
 } // namespace dnp

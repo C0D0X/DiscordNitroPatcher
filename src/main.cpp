@@ -94,14 +94,24 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
     using dnp::Mode;
     Mode m = dnp::parse_mode(argc, argv);
 
+    dnp::log_init();
+
+    // Apply any staged update before we take the single-instance mutex so
+    // the freshly-spawned new exe gets the slot cleanly.
+    if (m != Mode::Version && dnp::apply_pending_update_if_any()) {
+        if (argv) LocalFree(argv);
+        dnp::log_shutdown();
+        return 0;
+    }
+
     bool should_continue = true;
     HANDLE single_instance = dnp::acquire_mutex_for_mode(m, should_continue);
     if (!should_continue) {
         if (argv) LocalFree(argv);
+        dnp::log_shutdown();
         return 0;
     }
 
-    dnp::log_init();
     LOG_INFO("dnp %ls mode=%d", dnp::VERSION, (int)m);
 
     int rc = 0;
@@ -120,16 +130,16 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
             rc = dnp::do_uninstall();
             break;
         case Mode::Launch:
-            dnp::check_for_update_and_maybe_restart();
+            dnp::start_background_update_check();
             rc = dnp::do_launch();
             break;
         case Mode::UI:
-            dnp::check_for_update_and_maybe_restart();
+            dnp::start_background_update_check();
             rc = dnp::run_ui();
             break;
         case Mode::Auto:
         default:
-            dnp::check_for_update_and_maybe_restart();
+            dnp::start_background_update_check();
             rc = dnp::run_ui();
             break;
     }
