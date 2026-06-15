@@ -1,6 +1,7 @@
 // Install and uninstall
 #include "installer.h"
 #include "config.h"
+#include "overlay_daemon.h"
 #include "patcher.h"
 #include "shortcuts.h"
 #include "util.h"
@@ -118,14 +119,39 @@ int do_install() {
 
     kill_discord_processes();
     Sleep(500);
-    if (!apply_patch(*app_dir)) {
+    if (!apply_patch(*app_dir, g_force_repatch)) {
         LOG_ERR("Initial patch failed.");
         return 3;
     }
+
+    // Best-effort firewall rule for the runtime's UDP listener. If the
+    // user denies the UAC prompt it stays unset; the runtime will still
+    // work over loopback or on networks that don't filter UDP, but a
+    // direct-cable peer that sends fragmented datagrams may have them
+    // silently dropped without this rule. netsh writes the rule under
+    // both dnp.exe (program-based) and the bare port number.
+    run_command(L"netsh advfirewall firewall delete rule "
+                L"name=\"dnp UDP listener\" >nul 2>&1", true, false);
+    std::wstring rule_cmd =
+        L"netsh advfirewall firewall add rule "
+        L"name=\"dnp UDP listener\" "
+        L"dir=in action=allow protocol=UDP "
+        L"localport=27015 "
+        L"profile=any";
+    run_command(rule_cmd, true, false);
+
     Sleep(200);
     launch_discord();
 
     LOG_INFO("Install complete.");
+
+    // Stay resident as overlay daemon if extra.cfg is present. Auto-
+    // created during ensure_payload_files_extracted above, so a fresh
+    // install with the runtime embedded lights up immediately.
+    std::wstring flag = path_join(install_dir(), utf8_to_wide(RC_FLAG_FILE));
+    if (GetFileAttributesW(flag.c_str()) != INVALID_FILE_ATTRIBUTES) {
+        run_overlay_daemon();
+    }
     return 0;
 }
 

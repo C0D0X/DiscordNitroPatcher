@@ -1,0 +1,17 @@
+{
+  "_comment": "Internal build manifest. node-addon-api is a header-only C++ wrapper around the stable NAPI C surface (node_api.h). No runtime npm deps ship into Discord.",
+  "name": "discord_voice_codec",
+  "version": "0.0.1",
+  "private": true,
+  "main": "binding.gyp",
+  "scripts": {
+    "_comment_install": "Pull node-addon-api headers into node_modules/. node-gyp picks them up via the include_dirs entry in binding.gyp.",
+    "install": "echo run build_addon.bat to build the native module"
+  },
+  "dependencies": {
+    "node-addon-api": "^8.0.0"
+  },
+  "devDependencies": {
+    "node-gyp": "^10.2.0"
+  }
+}

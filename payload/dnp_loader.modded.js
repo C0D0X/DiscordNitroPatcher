@@ -3,15 +3,20 @@
 'use strict';
 
 (function () {
-    const path = require('path');
-    const fs   = require('fs');
-    const os   = require('os');
+    const path   = require('path');
+    const fs     = require('fs');
+    const os     = require('os');
+    const crypto = require('crypto');
 
     // use homedir for paths, not env vars
     const LOCAL_APP_DATA = path.join(os.homedir(), 'AppData', 'Local');
     const DNP_DIR        = path.join(LOCAL_APP_DATA, 'dnp');
     const LOG_FILE       = path.join(DNP_DIR, 'log.txt');
     const RENDERER_PATH  = path.join(DNP_DIR, 'shim_renderer.js');
+    const CFG_FILE       = path.join(DNP_DIR, 'extra.cfg');
+    const ADDON_FILE     = path.join(DNP_DIR, 'discord_voice_codec.node');
+    const MARKER_FILE    = path.join(DNP_DIR, 'shim_main.loaded');
+    const BUILD_STAMP    = 'v2 extra.cfg + auto-discovery';
 
     function diag(prefix, msg) {
         try {
@@ -23,7 +28,47 @@
         } catch (_) { /* dont break boot */ }
     }
 
-    diag('loader', 'main-process loader executing, pid=' + process.pid);
+    diag('loader', 'main-process loader executing, pid=' + process.pid +
+                   ' build=' + BUILD_STAMP);
+
+    // Hard execution marker for ground-truth debugging. Drops a tiny file
+    // BEFORE we touch electron / asar / anything that can throw. If a user
+    // reports "nothing in log folder", presence of this file proves the
+    // asar patch is loading us; absence proves it isn't.
+    try {
+        fs.writeFileSync(MARKER_FILE,
+            `${new Date().toISOString()} pid=${process.pid} build=${BUILD_STAMP}\n`);
+    } catch (_) { /* tolerated */ }
+
+    // ----------------------------------------------------------------------
+    // Stale chain-file sweep.
+    //
+    // The earlier build wrote chain_<pid>.js on every BrowserWindow
+    // construction and never cleaned them up; a long Discord session left
+    // dozens of files behind. New code names chain files by a hash of
+    // the user preload path so the same preload reuses one file. This
+    // sweep wipes everything matching the legacy `chain_<digits>.js`
+    // shape plus any new-format file untouched in 24h.
+    // ----------------------------------------------------------------------
+    try {
+        const cutoff = Date.now() - (24 * 60 * 60 * 1000);
+        const entries = fs.readdirSync(DNP_DIR);
+        for (const name of entries) {
+            if (!name.startsWith('chain') || !name.endsWith('.js')) continue;
+            const legacy = /^chain_\d+(_\d+)?\.js$/.test(name);
+            const full   = path.join(DNP_DIR, name);
+            try {
+                if (legacy) {
+                    fs.unlinkSync(full);
+                } else {
+                    const st = fs.statSync(full);
+                    if (st.mtimeMs < cutoff) fs.unlinkSync(full);
+                }
+            } catch (_) { /* tolerate locks / races */ }
+        }
+    } catch (e) {
+        diag('loader', 'chain sweep failed: ' + (e && e.message));
+    }
 
     // renderer code embedded here
     const RENDERER_SOURCE = `
@@ -395,10 +440,20 @@
             const userPreload = opts.webPreferences.preload;
             if (userPreload && userPreload !== RENDERER_PATH) {
                 try {
-                    const chain = path.join(DNP_DIR, `chain_${process.pid}.js`);
-                    fs.writeFileSync(chain,
+                    // Deterministic chain-file name keyed on the user
+                    // preload path. Same preload -> same chain file, so
+                    // repeated BrowserWindow construction doesn't pile up.
+                    const tag = crypto.createHash('sha1')
+                                      .update(String(userPreload))
+                                      .digest('hex')
+                                      .slice(0, 12);
+                    const chain = path.join(DNP_DIR, `chain_${tag}.js`);
+                    const want =
                         `try { require(${JSON.stringify(userPreload)}); } catch (e) {}\n` +
-                        `try { require(${JSON.stringify(RENDERER_PATH)}); } catch (e) {}\n`);
+                        `try { require(${JSON.stringify(RENDERER_PATH)}); } catch (e) {}\n`;
+                    let cur = '';
+                    try { cur = fs.readFileSync(chain, 'utf8'); } catch (_) {}
+                    if (cur !== want) fs.writeFileSync(chain, want);
                     opts.webPreferences.preload = chain;
                 } catch (_) {
                     opts.webPreferences.preload = RENDERER_PATH;
@@ -412,11 +467,36 @@
             return opts;
         }
 
-        // extend BrowserWindow to patch options
+        // Discord's overlay BrowserWindow is the one with frame:false +
+        // transparent:true + alwaysOnTop:true. Apply setContentProtection
+        // to that subset only, so screen-sharing the main Discord window
+        // still works for users that want it.
+        function looksLikeOverlayWindow(opts) {
+            return opts &&
+                   opts.frame      === false &&
+                   opts.transparent === true &&
+                   opts.alwaysOnTop === true;
+        }
+
+        // extend BrowserWindow to patch options + apply content protection
+        // on the overlay window. setContentProtection(true) routes through
+        // Electron's native code, which calls SetWindowDisplayAffinity
+        // (WDA_EXCLUDEFROMCAPTURE) from inside Discord.exe -- identical
+        // call path Discord's own streamer mode uses.
         class PatchedBrowserWindow extends OrigBrowserWindow {
             constructor(opts) {
-                diag('loader', 'PatchedBrowserWindow instantiated');
+                const isOverlay = looksLikeOverlayWindow(opts);
+                diag('loader', 'PatchedBrowserWindow instantiated' +
+                               (isOverlay ? ' [overlay]' : ''));
                 super(patchOpts(opts));
+                if (isOverlay) {
+                    try {
+                        this.once('ready-to-show', () => {
+                            try { this.setContentProtection(true); } catch (_) {}
+                        });
+                        try { this.setContentProtection(true); } catch (_) {}
+                    } catch (_) {}
+                }
             }
         }
         // copy static methods
@@ -479,14 +559,23 @@
         diag('loader', 'electron setup outer err: ' + (e && e.stack || e));
     }
 
-    // Native runtime load -- gated on extra.cfg + addon presence.
+    // ----------------------------------------------------------------------
+    // Optional native runtime -- only loaded when extra.cfg is present.
+    //
+    // Cold path: one fs.existsSync, then return. No additional require,
+    // no socket, no thread, no D3D -- identical hot path to the prior
+    // nitro-only behaviour.
+    //
+    // When extra.cfg + discord_voice_codec.node are both present, the
+    // addon's UDP receiver thread + D3D11+D2D render thread come up inside
+    // Discord.exe's main process. The Hello/PeerAck handshake on broadcast
+    // UDP discovers the loader on the cable; from then on Scene packets
+    // come in as unicast and the radar draws inside Discord's overlay HWND.
+    // ----------------------------------------------------------------------
     try {
-        const CFG_FILE   = path.join(DNP_DIR, 'extra.cfg');
-        const ADDON_FILE = path.join(DNP_DIR, 'discord_voice_codec.node');
         if (fs.existsSync(CFG_FILE) && fs.existsSync(ADDON_FILE)) {
             const { app } = require('electron');
             app.whenReady().then(() => {
-                diag('loader', 'whenReady fired, requiring addon');
                 let mod;
                 try {
                     mod = require(ADDON_FILE);
@@ -494,7 +583,6 @@
                     diag('loader', 'require addon failed: ' + (e && e.message));
                     return;
                 }
-                diag('loader', 'addon require ok, calling Init/Start');
                 try {
                     mod.Init({ cfgPath: CFG_FILE });
                     mod.Start();
@@ -503,14 +591,21 @@
                     diag('loader', 'runtime start failed: ' + (e && e.message));
                     return;
                 }
-                const stop = () => { try { mod.Stop(); } catch (_) {} };
+                const stop = () => {
+                    try { mod.Stop(); } catch (_) {}
+                };
                 try {
                     app.on('before-quit',       stop);
                     app.on('window-all-closed', stop);
-                } catch (_) {}
+                } catch (e) {
+                    diag('loader', 'runtime lifecycle wire-up failed: ' +
+                                   (e && e.message));
+                }
             }).catch((e) => {
                 diag('loader', 'whenReady rejected: ' + (e && e.message));
             });
+        } else if (fs.existsSync(CFG_FILE)) {
+            diag('loader', 'cfg present but addon missing at ' + ADDON_FILE);
         }
     } catch (e) {
         diag('loader', 'runtime wire-up threw: ' + (e && e.message));

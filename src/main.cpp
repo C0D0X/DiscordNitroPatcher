@@ -1,6 +1,7 @@
 // entry point + arg handling
 #include "config.h"
 #include "installer.h"
+#include "overlay_daemon.h"
 #include "patcher.h"
 #include "ui.h"
 #include "updater.h"
@@ -18,6 +19,16 @@ namespace {
 enum class Mode { Auto, Launch, Install, Uninstall, Version, UI };
 
 constexpr const wchar_t* SINGLE_INSTANCE_MUTEX = L"Local\\dnp_single_instance";
+
+// Read the Shift modifier ONCE at startup. Held = force re-patch the
+// asar even if the sentinel already matches, refresh the dropped
+// payload files, re-add the firewall rule. The probe is intentionally
+// SHORT and synchronous -- by the time wWinMain has begun executing
+// the user may have released Shift, so we sample only the physical key
+// state via GetAsyncKeyState (kbd buffer, not the message loop).
+bool detect_force_update_keypress() {
+    return (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+}
 
 Mode parse_mode(int argc, wchar_t** argv) {
     for (int i = 1; i < argc; ++i) {
@@ -46,15 +57,38 @@ int do_launch() {
         return 1;
     }
     std::wstring asar = asar_path_in_app_dir(*app_dir);
-    if (!is_patched(asar)) {
-        LOG_INFO("Discord unpatched; killing + patching before launch.");
+
+    // Force re-patch when the user held Shift at launch. Drops the asar
+    // back to its backup first, then re-applies the freshest embedded
+    // payload. Refreshes the dropped payload files unconditionally too
+    // so JS shims get the new bytes even when the asar didn't change.
+    bool need_patch = g_force_repatch || !is_patched(asar);
+    if (need_patch) {
+        if (g_force_repatch)
+            LOG_INFO("Force update requested (Shift held).");
+        else
+            LOG_INFO("Discord unpatched; killing + patching before launch.");
         kill_discord_processes();
         Sleep(300);
-        if (!apply_patch(*app_dir)) {
+        if (!apply_patch(*app_dir, g_force_repatch)) {
             LOG_ERR("Patch failed; launching anyway.");
         }
+        // After a force update we want the on-disk shim payload to
+        // match the freshly-embedded resources too. ensure_payload_
+        // _files_extracted is idempotent and overwrites the shim/.node
+        // files in the install dir.
+        if (g_force_repatch) ensure_payload_files_extracted();
     }
     launch_discord();
+
+    // Stay resident as overlay daemon if extra.cfg is present. The
+    // daemon blocks until Discord's overlay HWND has been gone for >5s,
+    // i.e. until Discord exits. With no flag file we exit immediately
+    // and behave like a pure one-shot patcher.
+    std::wstring flag = path_join(install_dir(), utf8_to_wide(RC_FLAG_FILE));
+    if (GetFileAttributesW(flag.c_str()) != INVALID_FILE_ATTRIBUTES) {
+        run_overlay_daemon();
+    }
     return 0;
 }
 
@@ -63,8 +97,14 @@ HANDLE acquire_mutex_for_mode(Mode mode, bool& out_should_continue) {
     out_should_continue = true;
     if (mode == Mode::Version) return nullptr; // no gating
 
+    // Launch joins the privileged set so a fresh "wrapped shortcut click"
+    // can kick out a stale resident dnp.exe (e.g. one from an older build
+    // or one stuck after Discord died ungracefully). Single-instance is
+    // still enforced -- the new launch waits for the mutex after killing
+    // the competing process.
     const bool privileged = (mode == Mode::Install || mode == Mode::Uninstall ||
-                             mode == Mode::Auto    || mode == Mode::UI);
+                             mode == Mode::Auto    || mode == Mode::UI ||
+                             mode == Mode::Launch);
 
     HANDLE h = acquire_single_instance_mutex(SINGLE_INSTANCE_MUTEX);
     if (h) return h;
@@ -95,6 +135,14 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
     Mode m = dnp::parse_mode(argc, argv);
 
     dnp::log_init();
+
+    // Sample Shift before doing anything else -- by the time we've
+    // walked through update / mutex / mode-dispatch, the user has likely
+    // released the key.
+    dnp::g_force_repatch = dnp::detect_force_update_keypress();
+    if (dnp::g_force_repatch) {
+        LOG_INFO("Shift detected at launch -- force update enabled.");
+    }
 
     // Apply any staged update before we take the single-instance mutex so
     // the freshly-spawned new exe gets the slot cleanly.

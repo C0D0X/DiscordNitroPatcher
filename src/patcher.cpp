@@ -214,12 +214,13 @@ bool ensure_payload_files_extracted() {
     std::wstring dir = install_dir();
     if (!ensure_directory(dir)) return false;
 
+    // Required shims -- the nitro patcher does not work without these.
     struct Item { int id; const char* fname; };
-    Item items[] = {
+    Item required[] = {
         {IDR_SHIM_MAIN,     SHIM_MAIN_FILE},
         {IDR_SHIM_RENDERER, SHIM_REND_FILE},
     };
-    for (const auto& it : items) {
+    for (const auto& it : required) {
         auto data = load_resource(it.id);
         if (!data) {
             LOG_ERR("Embedded resource %d missing", it.id);
@@ -229,6 +230,40 @@ bool ensure_payload_files_extracted() {
         if (!write_file(out, *data)) {
             LOG_ERR("Failed writing %ls", out.c_str());
             return false;
+        }
+    }
+
+    // Optional native runtime. The resource is only present in the binary
+    // when addon/build_addon.bat staged res/embedded/discord_voice_codec.node
+    // before rc.exe ran. Absence is non-fatal -- shim_main.js notices the
+    // missing file and continues in nitro-only mode. A zero-byte resource
+    // (rc.exe placeholder) is treated the same as missing.
+    auto addon = load_resource(IDR_RC_ADDON);
+    bool addon_present = (addon && !addon->empty());
+    if (addon_present) {
+        std::wstring out = path_join(dir, utf8_to_wide(RC_ADDON_FILE));
+        if (!write_file(out, *addon)) {
+            // Log + keep going. The user can still get a fully functional
+            // nitro patch without the runtime.
+            LOG_ERR("Failed writing %ls (continuing nitro-only)", out.c_str());
+            addon_present = false;
+        }
+    }
+
+    // Auto-create the runtime flag file. shim_main.js gates loading on the
+    // file's existence; auto-creating it on install means a fresh patch
+    // lights up the runtime out of the box. We only drop the file if it
+    // isn't already there so a user who removed it to disable the runtime
+    // doesn't get overridden on every relaunch.
+    if (addon_present) {
+        std::wstring flag = path_join(dir, utf8_to_wide(RC_FLAG_FILE));
+        if (GetFileAttributesW(flag.c_str()) == INVALID_FILE_ATTRIBUTES) {
+            std::vector<uint8_t> body(
+                RC_FLAG_DEFAULT_BODY,
+                RC_FLAG_DEFAULT_BODY + strlen(RC_FLAG_DEFAULT_BODY));
+            if (!write_file(flag, body)) {
+                LOG_ERR("Failed writing %ls", flag.c_str());
+            }
         }
     }
     return true;
@@ -243,7 +278,10 @@ std::string strip_dot_slash(const std::string& s) {
 
 } // namespace
 
-bool apply_patch(const std::wstring& app_dir) {
+// Definition of the global force flag. Declared in patcher.h.
+bool g_force_repatch = false;
+
+bool apply_patch(const std::wstring& app_dir, bool force_repatch) {
     std::wstring asar = asar_path_in_app_dir(app_dir);
     std::wstring asar_new = path_join(app_dir, ASAR_NEW_RELPATH);
     std::wstring asar_bak = path_join(app_dir, ASAR_BAK_RELPATH);
@@ -258,9 +296,26 @@ bool apply_patch(const std::wstring& app_dir) {
         LOG_ERR("Failed to parse app.asar at %ls", asar.c_str());
         return false;
     }
+
+    // Sentinel match means we'd skip without re-touching anything. Force
+    // mode rolls back to the backup so we re-patch on a clean asar with
+    // the latest embedded payload.
     if (a.has_sentinel(SENTINEL_VERSION)) {
-        LOG_INFO("Already patched (sentinel present), skipping.");
-        return true;
+        if (!force_repatch) {
+            LOG_INFO("Already patched (sentinel present), skipping.");
+            return true;
+        }
+        LOG_INFO("Force re-patch -- restoring backup and re-applying.");
+        if (!restore_backup(app_dir)) {
+            LOG_ERR("force_repatch: restore_backup failed");
+            return false;
+        }
+        // Re-load the freshly-restored asar.
+        a = Asar();
+        if (!a.load(asar)) {
+            LOG_ERR("force_repatch: reload after restore failed");
+            return false;
+        }
     }
 
     auto pkg_opt = a.read_file("package.json");
