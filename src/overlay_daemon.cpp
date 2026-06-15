@@ -1352,6 +1352,16 @@ int run_overlay_daemon() {
         }
     }
 
+    // Lift the whole process above normal scheduler bands. Recv and render
+    // are already TIME_CRITICAL at the thread level, but a NORMAL process
+    // class caps thread priorities at the normal band's ceiling -- so the
+    // thread-level priority was effectively clamped. REALTIME removes the
+    // cap and lets the loader-side cycle (sub-millisecond) translate
+    // directly into matching response on the draw path. Requires the
+    // process to hold SeIncreaseBasePriorityPrivilege; Discord's parent
+    // process typically does.
+    SetPriorityClass(GetCurrentProcess(), REALTIME_PRIORITY_CLASS);
+
     SceneBuf buf{};
     // Auto-reset event -- one SetEvent unblocks one WaitForSingleObject.
     buf.new_scene = CreateEventW(nullptr, FALSE, FALSE, nullptr);
