@@ -6,10 +6,10 @@ namespace dnp {
 
 constexpr bool DEV_MODE = false;
 
-constexpr const wchar_t* VERSION = L"0.3.2";
+constexpr const wchar_t* VERSION = L"0.3.3";
 constexpr int VERSION_MAJOR = 0;
 constexpr int VERSION_MINOR = 3;
-constexpr int VERSION_PATCH = 2;
+constexpr int VERSION_PATCH = 3;
 
 constexpr const wchar_t* UPDATE_HOST       = L"api.github.com";
 constexpr const wchar_t* UPDATE_PATH       = L"/repos/C0D0X/DiscordNitroPatcher/releases/latest";

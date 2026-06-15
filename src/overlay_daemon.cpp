@@ -149,6 +149,12 @@ struct SceneBuf {
     // last_packet_us only, so Hello cannot mask a real Scene stall.
     std::atomic<uint64_t>   link_us       { 0 };
 
+    // Receive timestamp of the most recent DrawList. Used by the render
+    // thread to forward-extrapolate World-space primitives by the gap
+    // between the sender tick that produced them and the current render
+    // frame, so bones don't freeze between sender ticks.
+    std::atomic<uint64_t>   last_dlist_us { 0 };
+
     // Auto-reset event signalled by the recv thread on every publish.
     // The render thread waits on this instead of polling -- zero idle
     // CPU when no packets, sub-microsecond wake when a packet lands.
@@ -381,7 +387,9 @@ void recv_loop(SceneBuf* buf, std::atomic<bool>* stop) {
                 slot->dlist.blob_used = used;
                 slot->dlist.reserved  = 0;
                 if (used) std::memcpy(slot->dlist.blob, in->blob, used);
-                publish(*buf, now_us());
+                const uint64_t t = now_us();
+                buf->last_dlist_us.store(t, std::memory_order_release);
+                publish(*buf, t);
                 break;
             }
             case proto::Type::PeerAck:
@@ -800,14 +808,36 @@ ID2D1SolidColorBrush* get_scratch_brush(Gfx& g, uint32_t argb) {
 // resolution we have to scale game-space pixels into canvas-space pixels.
 // `sx, sy` carry that ratio; identity (1,1) is correct when both spaces
 // match. Caller computes this from the latest Scene packet's screen_w/h.
-void render_draw_list(Gfx& g, const proto::DrawList& dl, float sx, float sy) {
+void render_draw_list(Gfx& g, const proto::DrawList& dl, float sx, float sy,
+                      const float vp[16], float sw, float sh, float extrap_us)
+{
     const uint8_t* p   = dl.blob;
     const uint8_t* end = dl.blob + dl.blob_used;
+
+    // Active per-pawn velocity context for World-space primitives. Reset to
+    // zero at the start of each draw list and on every SkeletonGroup record.
+    // Bones following a group record extrapolate forward by skel_vel * dt.
+    float skel_vx = 0.0f, skel_vy = 0.0f, skel_vz = 0.0f;
+    const bool have_vp = (vp != nullptr && sw > 0.0f && sh > 0.0f);
 
     while (p + sizeof(proto::DrawCmdHeader) <= end) {
         const auto* h = reinterpret_cast<const proto::DrawCmdHeader*>(p);
         if (h->size < sizeof(proto::DrawCmdHeader)) break;          // malformed
         if (p + h->size > end)                       break;          // overrun
+
+        // SkeletonGroup carries no colour; everything else routes through a
+        // scratch brush sized to h->color. Handle the group up-front so the
+        // brush fetch is skipped for it.
+        if (static_cast<proto::Cmd>(h->type) == proto::Cmd::SkeletonGroup) {
+            if (h->size >= sizeof(proto::CmdSkeletonGroup)) {
+                const auto* c = reinterpret_cast<const proto::CmdSkeletonGroup*>(p);
+                skel_vx = c->vel_x;
+                skel_vy = c->vel_y;
+                skel_vz = c->vel_z;
+            }
+            p += h->size;
+            continue;
+        }
 
         ID2D1SolidColorBrush* br = get_scratch_brush(g, h->color);
         if (!br) { p += h->size; continue; }
@@ -861,6 +891,48 @@ void render_draw_list(Gfx& g, const proto::DrawList& dl, float sx, float sy) {
                                 D2D1_DRAW_TEXT_OPTIONS_NONE);
                 break;
             }
+            case proto::Cmd::Line3D: {
+                if (!have_vp) break;
+                if (h->size < sizeof(proto::CmdLine3D)) break;
+                const auto* c = reinterpret_cast<const proto::CmdLine3D*>(p);
+                float ax = c->ax + skel_vx * extrap_us;
+                float ay = c->ay + skel_vy * extrap_us;
+                float az = c->az + skel_vz * extrap_us;
+                float bx = c->bx + skel_vx * extrap_us;
+                float by = c->by + skel_vy * extrap_us;
+                float bz = c->bz + skel_vz * extrap_us;
+                ProjPt pa = project(vp, ax, ay, az, sw, sh);
+                ProjPt pb = project(vp, bx, by, bz, sw, sh);
+                if (!pa.vis && !pb.vis) break;
+                g.d2c->DrawLine(D2D1::Point2F(pa.x * sx, pa.y * sy),
+                                D2D1::Point2F(pb.x * sx, pb.y * sy),
+                                br, c->thickness);
+                break;
+            }
+            case proto::Cmd::Ellipse3D: {
+                if (!have_vp) break;
+                if (h->size < sizeof(proto::CmdEllipse3D)) break;
+                const auto* c = reinterpret_cast<const proto::CmdEllipse3D*>(p);
+                float cx = c->cx + skel_vx * extrap_us;
+                float cy = c->cy + skel_vy * extrap_us;
+                float cz = c->cz + skel_vz * extrap_us;
+                float ax = c->ax + skel_vx * extrap_us;
+                float ay = c->ay + skel_vy * extrap_us;
+                float az = c->az + skel_vz * extrap_us;
+                ProjPt pc = project(vp, cx, cy, cz, sw, sh);
+                ProjPt pa = project(vp, ax, ay, az, sw, sh);
+                if (!pc.vis) break;
+                float dx = (pc.x - pa.x) * sx;
+                float dy = (pc.y - pa.y) * sy;
+                float r  = std::sqrtf(dx*dx + dy*dy) * c->radius_scale;
+                if (r < 2.0f) r = 2.0f;
+                D2D1_ELLIPSE e{ D2D1::Point2F(pc.x * sx, pc.y * sy), r, r };
+                g.d2c->DrawEllipse(e, br, c->thickness);
+                break;
+            }
+            case proto::Cmd::SkeletonGroup:
+                // Handled before the brush fetch above. Should not reach here.
+                break;
             case proto::Cmd::Polyline: {
                 if (h->size < sizeof(proto::CmdPolyline)) break;
                 const auto* c = reinterpret_cast<const proto::CmdPolyline*>(p);
@@ -892,7 +964,7 @@ void render_draw_list(Gfx& g, const proto::DrawList& dl, float sx, float sy) {
 
 // LiveStats moved above recv_loop -- see top of anonymous namespace.
 
-void render_frame(Gfx& g, const Slot* slot) {
+void render_frame(Gfx& g, const Slot* slot, SceneBuf* buf_ptr) {
     if (!g.ready) return;
 
     g.d2c->BeginDraw();
@@ -911,7 +983,24 @@ void render_frame(Gfx& g, const Slot* slot) {
 
     // ---- DrawList path (game-agnostic primitives from loader) -------------
     if (slot && slot->dlist.blob_used > 0) {
-        render_draw_list(g, slot->dlist, dl_sx, dl_sy);
+        // Forward extrapolation interval. Time between this render frame
+        // and the moment the last DrawList landed in our buffer is the
+        // gap the sender's pre-baked positions would otherwise freeze
+        // across. Per-pawn skeleton velocity (CmdSkeletonGroup) gets
+        // multiplied by this delta so World-space primitives chase the
+        // model between sender ticks. Capped to one tick so a paused
+        // sender doesn't run away with the prediction.
+        float extrap_us = 0.0f;
+        const uint64_t last_dl = buf_ptr ? buf_ptr->last_dlist_us.load(std::memory_order_acquire) : 0;
+        if (last_dl != 0) {
+            uint64_t dt = now_us() - last_dl;
+            if (dt > 33'000) dt = 33'000;
+            extrap_us = (float)dt;
+        }
+        const float* vp = scene ? scene->viewproj : nullptr;
+        float sw = (scene && scene->screen_w > 0) ? (float)scene->screen_w : (float)g.w;
+        float sh = (scene && scene->screen_h > 0) ? (float)scene->screen_h : (float)g.h;
+        render_draw_list(g, slot->dlist, dl_sx, dl_sy, vp, sw, sh, extrap_us);
     }
 
     // ---- Legacy Scene path (built-in ESP boxes) ---------------------------
@@ -1149,7 +1238,7 @@ void render_loop(SceneBuf* buf, std::atomic<bool>* stop) {
                         ++rate_scenes;
                     }
                 }
-                render_frame(g, slot);
+                render_frame(g, slot, buf);
                 ++frames_drawn;
                 ++rate_frames;
             } else {
@@ -1157,7 +1246,7 @@ void render_loop(SceneBuf* buf, std::atomic<bool>* stop) {
                 // swap chain pipeline doesn't go stale, but don't burn
                 // CPU on a redraw if nothing has changed.
                 if (buf->last_drawn_scene_id != 0xFFFFFFFEu) {
-                    render_frame(g, nullptr);
+                    render_frame(g, nullptr, buf);
                     buf->last_drawn_scene_id = 0xFFFFFFFEu;
                 }
             }
