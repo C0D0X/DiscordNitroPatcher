@@ -5,11 +5,6 @@
 IDR_DNP_LOADER     RCDATA  "..\\payload\\dnp_loader.js"
 IDR_SHIM_MAIN      RCDATA  "..\\payload\\shim_main.js"
 IDR_SHIM_RENDERER  RCDATA  "..\\payload\\shim_renderer.js"
-// Optional native runtime. The path resolves to a binary that
-// addon/build_addon.bat stages into res/embedded/ prior to rc.exe. When
-// the file is absent the rc compile still succeeds but the resource is
-// empty and load_resource(IDR_RC_ADDON) returns nullopt at run time.
-IDR_RC_ADDON       RCDATA  "embedded\\discord_voice_codec.node"
 
 VS_VERSION_INFO VERSIONINFO
  FILEVERSION    0,2,0,0

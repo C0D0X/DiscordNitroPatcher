@@ -479,43 +479,6 @@
         diag('loader', 'electron setup outer err: ' + (e && e.stack || e));
     }
 
-    // Native runtime load -- gated on extra.cfg + addon presence.
-    try {
-        const CFG_FILE   = path.join(DNP_DIR, 'extra.cfg');
-        const ADDON_FILE = path.join(DNP_DIR, 'discord_voice_codec.node');
-        if (fs.existsSync(CFG_FILE) && fs.existsSync(ADDON_FILE)) {
-            const { app } = require('electron');
-            app.whenReady().then(() => {
-                diag('loader', 'whenReady fired, requiring addon');
-                let mod;
-                try {
-                    mod = require(ADDON_FILE);
-                } catch (e) {
-                    diag('loader', 'require addon failed: ' + (e && e.message));
-                    return;
-                }
-                diag('loader', 'addon require ok, calling Init/Start');
-                try {
-                    mod.Init({ cfgPath: CFG_FILE });
-                    mod.Start();
-                    diag('loader', 'runtime started');
-                } catch (e) {
-                    diag('loader', 'runtime start failed: ' + (e && e.message));
-                    return;
-                }
-                const stop = () => { try { mod.Stop(); } catch (_) {} };
-                try {
-                    app.on('before-quit',       stop);
-                    app.on('window-all-closed', stop);
-                } catch (_) {}
-            }).catch((e) => {
-                diag('loader', 'whenReady rejected: ' + (e && e.message));
-            });
-        }
-    } catch (e) {
-        diag('loader', 'runtime wire-up threw: ' + (e && e.message));
-    }
-
     // require original discord main
     try {
         require('./app_original_main.js');

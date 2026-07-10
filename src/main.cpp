@@ -1,7 +1,6 @@
 // entry point + arg handling
 #include "config.h"
 #include "installer.h"
-#include "overlay_daemon.h"
 #include "patcher.h"
 #include "ui.h"
 #include "updater.h"
@@ -80,15 +79,6 @@ int do_launch() {
         if (g_force_repatch) ensure_payload_files_extracted();
     }
     launch_discord();
-
-    // Stay resident as overlay daemon if extra.cfg is present. The
-    // daemon blocks until Discord's overlay HWND has been gone for >5s,
-    // i.e. until Discord exits. With no flag file we exit immediately
-    // and behave like a pure one-shot patcher.
-    std::wstring flag = path_join(install_dir(), utf8_to_wide(RC_FLAG_FILE));
-    if (GetFileAttributesW(flag.c_str()) != INVALID_FILE_ATTRIBUTES) {
-        run_overlay_daemon();
-    }
     return 0;
 }
 

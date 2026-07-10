@@ -116,11 +116,6 @@ struct State {
     float footer_t = 0.0f;
     float footer_targ = 0.0f;
 
-    // Hidden dev hotspot: double-click the version badge to respawn the
-    // overlay daemon without restarting Discord. paint() refreshes the rect
-    // each frame; wnd_proc reads it from WM_LBUTTONDBLCLK.
-    RECT version_rc = {};
-
     bool busy = false;
     std::wstring busy_text;
 } g;
@@ -467,7 +462,6 @@ void paint(HWND hwnd, HDC hdc) {
         stroke_round(gfx, vx + 0.5f, vy + 0.5f, vw - 1.0f, 19.0f, 5.0f, gp(C_BTN_BORDER), 1.0f);
         draw_text(gfx, vbuf, fVer, vx, vy, vw, 20.0f, gp(C_TEXT_DIM),
                   StringAlignmentCenter, StringAlignmentCenter);
-        g.version_rc = { (LONG)vx, (LONG)vy, (LONG)(vx + vw), (LONG)(vy + 20.0f) };
     }
 
     {
@@ -611,37 +605,6 @@ void action_footer() {
         nullptr, nullptr, SW_SHOWNORMAL);
 }
 
-// Hidden dev hotspot: double-click the version badge in the patcher GUI.
-// Respawns the overlay daemon (this exe with `--launch`) without restarting
-// Discord. The `--launch` path is privileged in the single-instance mutex
-// contest, so it will kill this GUI process once it boots — which is fine,
-// the user clicked the badge to swap GUI -> daemon anyway. do_launch() skips
-// the asar patch + Discord kill when the patch sentinel still matches and
-// Discord is already up, so this is essentially a daemon-only restart.
-void action_restart_daemon() {
-    std::wstring exe = path_join(install_dir(), L"dnp.exe");
-    if (!file_exists(exe)) exe = self_exe_path();
-    if (exe.empty()) return;
-
-    std::wstring cmdline = L"\"" + exe + L"\" --launch";
-    std::vector<wchar_t> cmdbuf(cmdline.begin(), cmdline.end());
-    cmdbuf.push_back(L'\0');
-
-    STARTUPINFOW si{ sizeof(si) };
-    PROCESS_INFORMATION pi{};
-    if (CreateProcessW(exe.c_str(), cmdbuf.data(),
-                       nullptr, nullptr, FALSE,
-                       CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS,
-                       nullptr, install_dir().c_str(),
-                       &si, &pi)) {
-        CloseHandle(pi.hThread);
-        CloseHandle(pi.hProcess);
-        // The fresh --launch will take the mutex and kill us. Exit cleanly
-        // here so the user doesn't see the GUI sitting in the kill window.
-        PostMessageW(g.hwnd_root, WM_CLOSE, 0, 0);
-    }
-}
-
 bool font_family_exists(const wchar_t* name) {
     FontFamily ff(name);
     return ff.GetLastStatus() == Ok;
@@ -724,14 +687,6 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 ensure_anim_timer();
             }
             return 0;
-        }
-        case WM_LBUTTONDBLCLK: {
-            POINT pt = { GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
-            if (PtInRect(&g.version_rc, pt)) {
-                action_restart_daemon();
-                return 0;
-            }
-            break;
         }
         case WM_LBUTTONUP: {
             POINT pt = { GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };

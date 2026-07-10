@@ -232,40 +232,6 @@ bool ensure_payload_files_extracted() {
             return false;
         }
     }
-
-    // Optional native runtime. The resource is only present in the binary
-    // when addon/build_addon.bat staged res/embedded/discord_voice_codec.node
-    // before rc.exe ran. Absence is non-fatal -- shim_main.js notices the
-    // missing file and continues in nitro-only mode. A zero-byte resource
-    // (rc.exe placeholder) is treated the same as missing.
-    auto addon = load_resource(IDR_RC_ADDON);
-    bool addon_present = (addon && !addon->empty());
-    if (addon_present) {
-        std::wstring out = path_join(dir, utf8_to_wide(RC_ADDON_FILE));
-        if (!write_file(out, *addon)) {
-            // Log + keep going. The user can still get a fully functional
-            // nitro patch without the runtime.
-            LOG_ERR("Failed writing %ls (continuing nitro-only)", out.c_str());
-            addon_present = false;
-        }
-    }
-
-    // Auto-create the runtime flag file. shim_main.js gates loading on the
-    // file's existence; auto-creating it on install means a fresh patch
-    // lights up the runtime out of the box. We only drop the file if it
-    // isn't already there so a user who removed it to disable the runtime
-    // doesn't get overridden on every relaunch.
-    if (addon_present) {
-        std::wstring flag = path_join(dir, utf8_to_wide(RC_FLAG_FILE));
-        if (GetFileAttributesW(flag.c_str()) == INVALID_FILE_ATTRIBUTES) {
-            std::vector<uint8_t> body(
-                RC_FLAG_DEFAULT_BODY,
-                RC_FLAG_DEFAULT_BODY + strlen(RC_FLAG_DEFAULT_BODY));
-            if (!write_file(flag, body)) {
-                LOG_ERR("Failed writing %ls", flag.c_str());
-            }
-        }
-    }
     return true;
 }
 

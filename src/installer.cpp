@@ -1,7 +1,6 @@
 // Install and uninstall
 #include "installer.h"
 #include "config.h"
-#include "overlay_daemon.h"
 #include "patcher.h"
 #include "shortcuts.h"
 #include "util.h"
@@ -38,12 +37,6 @@ bool copy_self_to_install_dir(std::wstring& out_installed_path) {
     DeleteFileW(zone.c_str());
     out_installed_path = dst;
     return true;
-}
-
-void unregister_legacy_scheduled_task() {
-    std::wstring cmd = L"schtasks.exe /delete /f /tn ";
-    cmd += TASK_NAME;
-    run_command(cmd, true, false);
 }
 
 std::wstring start_menu_shortcut_path() {
@@ -90,8 +83,6 @@ bool remove_start_menu_shortcut() {
 int do_install() {
     LOG_INFO("Install starting.");
 
-    unregister_legacy_scheduled_task();
-
     std::wstring installed_path;
     if (!copy_self_to_install_dir(installed_path)) {
         LOG_ERR("Self-copy failed.");
@@ -124,41 +115,15 @@ int do_install() {
         return 3;
     }
 
-    // Best-effort firewall rule for the runtime's UDP listener. If the
-    // user denies the UAC prompt it stays unset; the runtime will still
-    // work over loopback or on networks that don't filter UDP, but a
-    // direct-cable peer that sends fragmented datagrams may have them
-    // silently dropped without this rule. netsh writes the rule under
-    // both dnp.exe (program-based) and the bare port number.
-    run_command(L"netsh advfirewall firewall delete rule "
-                L"name=\"dnp UDP listener\" >nul 2>&1", true, false);
-    std::wstring rule_cmd =
-        L"netsh advfirewall firewall add rule "
-        L"name=\"dnp UDP listener\" "
-        L"dir=in action=allow protocol=UDP "
-        L"localport=27015 "
-        L"profile=any";
-    run_command(rule_cmd, true, false);
-
     Sleep(200);
     launch_discord();
 
     LOG_INFO("Install complete.");
-
-    // Stay resident as overlay daemon if extra.cfg is present. Auto-
-    // created during ensure_payload_files_extracted above, so a fresh
-    // install with the runtime embedded lights up immediately.
-    std::wstring flag = path_join(install_dir(), utf8_to_wide(RC_FLAG_FILE));
-    if (GetFileAttributesW(flag.c_str()) != INVALID_FILE_ATTRIBUTES) {
-        run_overlay_daemon();
-    }
     return 0;
 }
 
 int do_uninstall() {
     LOG_INFO("Uninstall starting.");
-
-    unregister_legacy_scheduled_task();
 
     int killed = kill_processes_by_name_except_self(L"dnp.exe");
     if (killed > 0) LOG_INFO("Terminated %d other dnp.exe instance(s).", killed);
